@@ -36,6 +36,14 @@ GROUP_CHAT_ID        = int(os.getenv("GROUP_CHAT_ID", "0"))
 BIRTHDAY_THREAD_ID   = int(os.getenv("BIRTHDAY_THREAD_ID", "0")) or None
 CHECK_HOUR_UTC       = int(os.getenv("CHECK_HOUR_UTC", "7"))   # 09:00 Київ
 
+# Гілка куди бот ПИШЕ всі повідомлення (спілкування)
+GROUP_THREAD_ID  = int(os.getenv("GROUP_THREAD_ID", "0")) or None
+
+# Гілка для привітань в день ДН (якщо відрізняється від GROUP_THREAD_ID)
+CONGRATS_THREAD_ID = int(os.getenv("CONGRATS_THREAD_ID", "0")) or None
+
+# BIRTHDAY_THREAD_ID — гілка звідки ЧИТАЄМО анкети (вже є вище)
+
 # ─── Логування ──────────────────────────────────────────────────────────────
 logging.basicConfig(format="%(asctime)s [%(levelname)s] %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -80,6 +88,13 @@ def parse_birthday(text: str) -> Optional[tuple]:
                 d = int(m.group(1))
                 if 1 <= d <= 31:
                     return d, month_num
+    return None
+
+def parse_birth_year(text: str) -> Optional[int]:
+    """Витягує рік народження з тексту (1970–2010)."""
+    m = re.search(r'\b(19[7-9]\d|200\d|201[0-9])\b', text)
+    if m:
+        return int(m.group(1))
     return None
 
 
@@ -132,7 +147,7 @@ def init_db():
             id                 INTEGER PRIMARY KEY AUTOINCREMENT,
             telegram_id        INTEGER UNIQUE,
             name               TEXT NOT NULL,
-            birthday           TEXT,           -- MM-DD
+            birthday           TEXT,           -- MM-DD or YYYY-MM-DD
             subscription_until TEXT,           -- YYYY-MM-DD; NULL = безстрокова
             is_active          INTEGER DEFAULT 1,
             joined_at          TEXT DEFAULT CURRENT_TIMESTAMP,
@@ -180,6 +195,7 @@ def init_db():
         ("nova_poshta",    "TEXT"),
         ("instagram",      "TEXT"),
         ("favorite_color", "TEXT"),
+        ("birth_year",     "INTEGER"),
     ]:
         try:
             conn.execute(f"ALTER TABLE members ADD COLUMN {col} {definition}")
@@ -406,13 +422,24 @@ def text_personal_reminder(birthday_name: str, bd_date: date, amount: int) -> st
         f"Після переказу натисни кнопку ↓"
     )
 
-def text_group_birthday(name: str, bd_date: date) -> str:
+def get_member_age(member_id: int, bd_date: date) -> Optional[int]:
+    """Повертає вік іменинниці якщо відомий рік народження."""
+    conn = get_conn()
+    row = conn.execute("SELECT birth_year FROM members WHERE id=?", (member_id,)).fetchone()
+    conn.close()
+    if row and row["birth_year"]:
+        return bd_date.year - row["birth_year"]
+    return None
+
+def text_group_birthday(name: str, bd_date: date, member_id: int = None) -> str:
     """В день ДН — святкове повідомлення в групу (без грошей)."""
-    mo = bd_date.month
-    d  = bd_date.day
+    mo  = bd_date.month
+    d   = bd_date.day
+    age = get_member_age(member_id, bd_date) if member_id else None
+    age_str = f"\n🎈 Виповнюється *{age} років*!" if age else ""
     return (
         f"🎂 Сьогодні день народження!\n\n"
-        f"🌸 Наша улюблена *{name}* святкує {d} {MONTH_GENITIVE_UA[mo]}!\n\n"
+        f"🌸 Наша улюблена *{name}* святкує {d} {MONTH_GENITIVE_UA[mo]}!{age_str}\n\n"
         f"Дівчата, давайте всі разом привітаємо іменинницю! 🥳🎉\n\n"
         f"З днем народження, *{name}*! 💐"
     )
@@ -431,16 +458,35 @@ def text_remind_manual(birthday_name: str, bd_date: date, amount: int) -> str:
 
 # ─── Надсилання в групу ─────────────────────────────────────────────────────
 
-async def send_to_group(context: ContextTypes.DEFAULT_TYPE, text: str):
+async def send_to_group(context: ContextTypes.DEFAULT_TYPE, text: str,
+                       congrats: bool = False):
+    """
+    Надсилає повідомлення в групу.
+    - Звичайні повідомлення → GROUP_THREAD_ID (гілка спілкування)
+    - congrats=True → CONGRATS_THREAD_ID (гілка привітань, якщо є) + GROUP_THREAD_ID
+    """
     if not GROUP_CHAT_ID:
         return
+
+    # Визначаємо куди писати
+    write_thread = GROUP_THREAD_ID  # гілка спілкування
+
     kwargs = {"chat_id": GROUP_CHAT_ID, "text": text, "parse_mode": "Markdown"}
-    if BIRTHDAY_THREAD_ID:
-        kwargs["message_thread_id"] = BIRTHDAY_THREAD_ID
+    if write_thread:
+        kwargs["message_thread_id"] = write_thread
     try:
         await context.bot.send_message(**kwargs)
     except Exception as e:
         logger.error(f"Помилка надсилання в групу: {e}")
+
+    # В день ДН — додатково пишемо в гілку привітань (якщо окрема)
+    if congrats and CONGRATS_THREAD_ID and CONGRATS_THREAD_ID != write_thread:
+        kwargs2 = {"chat_id": GROUP_CHAT_ID, "text": text, "parse_mode": "Markdown",
+                   "message_thread_id": CONGRATS_THREAD_ID}
+        try:
+            await context.bot.send_message(**kwargs2)
+        except Exception as e:
+            logger.error(f"Помилка надсилання в гілку привітань: {e}")
 
 
 # ─── Планувальник ───────────────────────────────────────────────────────────
@@ -457,7 +503,8 @@ async def daily_birthday_check(context: ContextTypes.DEFAULT_TYPE):
     conn.close()
 
     for member in all_members:
-        month, day = map(int, member["birthday"].split("-"))
+        parts = member["birthday"].split("-")
+        month, day = int(parts[-2]), int(parts[-1])
         try:
             bd = date(today.year, month, day)
         except ValueError:
@@ -485,7 +532,7 @@ async def daily_birthday_check(context: ContextTypes.DEFAULT_TYPE):
 
         # ── В день ДН: святкове повідомлення ───────────────────────────────
         elif days_until == 0 and not already_reminded(m["id"], 0, today.year, "group"):
-            await send_to_group(context, text_group_birthday(m["name"], bd))
+            await send_to_group(context, text_group_birthday(m["name"], bd, member_id=m["id"]), congrats=True)
             log_reminder(m["id"], 0, today.year, "group")
 
 
@@ -626,18 +673,23 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
         return
     day, month = result
     bd = f"{month:02d}-{day:02d}"
+    birth_year = parse_birth_year(text)
     conn = get_conn()
     existing = conn.execute(
         "SELECT id FROM members WHERE telegram_id=?", (user.id,)
     ).fetchone()
     if existing:
-        conn.execute("UPDATE members SET birthday=?, name=? WHERE telegram_id=?",
-                     (bd, user.full_name, user.id))
+        yr_update = ", birth_year=?" if birth_year else ""
+        yr_params = [birth_year] if birth_year else []
+        params = [bd, user.full_name] + yr_params + [user.id]
+        conn.execute(f"UPDATE members SET birthday=?, name=?{yr_update} WHERE telegram_id=?", params)
     else:
         conn.execute(
             "INSERT OR IGNORE INTO members (telegram_id, name, birthday) VALUES (?,?,?)",
             (user.id, user.full_name, bd)
         )
+        if birth_year:
+            conn.execute("UPDATE members SET birth_year=? WHERE telegram_id=?", (birth_year, user.id))
     # Парсимо додаткові дані
     extra = parse_extra_info(text)
     updates = []
@@ -666,6 +718,42 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
 
 # ─── Команди ────────────────────────────────────────────────────────────────
 
+async def _check_urgent_birthdays(context: ContextTypes.DEFAULT_TYPE):
+    """При активації нового користувача перевіряємо чи є термінові ДН (сьогодні/завтра)."""
+    today = date.today()
+    conn = get_conn()
+    members = conn.execute(
+        "SELECT id, telegram_id, name, birthday FROM members WHERE is_active=1 AND birthday IS NOT NULL"
+    ).fetchall()
+    conn.close()
+
+    for member in members:
+        month, day = map(int, member["birthday"].split("-")[::-1] if len(member["birthday"].split("-")) == 2 else member["birthday"].split("-")[1:])
+        try:
+            bd = date(today.year, month, day)
+        except ValueError:
+            continue
+        if bd < today:
+            continue
+
+        days_until = (bd - today).days
+        m = dict(member)
+
+        if days_until == 0 and not already_reminded(m["id"], 0, today.year, "group"):
+            await send_to_group(context, text_group_birthday(m["name"], bd, m["id"]), congrats=True)
+            log_reminder(m["id"], 0, today.year, "group")
+
+        elif days_until == 1 and not already_reminded(m["id"], 1, today.year, "group"):
+            await _do_day_before(context, m, bd)
+            log_reminder(m["id"], 1, today.year, "group")
+            log_reminder(m["id"], 1, today.year, "personal")
+
+        elif days_until == 3 and not already_reminded(m["id"], 3, today.year, "group"):
+            await _do_announce(context, m, bd)
+            log_reminder(m["id"], 3, today.year, "group")
+            log_reminder(m["id"], 3, today.year, "personal")
+
+
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     conn = get_conn()
@@ -673,6 +761,9 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                  (user.id, user.full_name))
     conn.commit()
     conn.close()
+
+    # Перевіряємо чи є ДН сьогодні або завтра — якщо так, запускаємо відповідні повідомлення
+    await _check_urgent_birthdays(context)
 
     text = (
         f"Привіт, {user.first_name}! 👋\n\n"
