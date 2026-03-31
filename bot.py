@@ -806,7 +806,8 @@ async def _check_urgent_birthdays(context: ContextTypes.DEFAULT_TYPE):
     conn.close()
 
     for member in members:
-        month, day = map(int, member["birthday"].split("-")[::-1] if len(member["birthday"].split("-")) == 2 else member["birthday"].split("-")[1:])
+        parts = member["birthday"].split("-")
+        month, day = int(parts[-2]), int(parts[-1])
         try:
             bd = date(today.year, month, day)
         except ValueError:
