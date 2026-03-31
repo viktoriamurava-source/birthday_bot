@@ -1343,7 +1343,7 @@ async def cmd_force_bday(update: Update, context: ContextTypes.DEFAULT_TYPE):
     event_id = await _ensure_event_exists(context, m, bd)
 
     # Надсилаємо в групу
-    active = await get_active_group_members(context.bot)
+    active = get_active_members()
     count = len([x for x in active if x["id"] != m["id"]])
     amount = round(BIRTHDAY_FUND_AMOUNT / count) if count else BIRTHDAY_FUND_AMOUNT
 
