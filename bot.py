@@ -1049,8 +1049,86 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await handle_group_message(update, context)
         return
 
+    message = update.message
+    user_id = update.effective_user.id
+
+    # Адмін пересилає повідомлення в особисті — імпорт дат
+    if message.forward_from and user_id in ADMIN_IDS:
+        original_user = message.forward_from
+        text_fwd = message.text or message.caption or ""
+        result = parse_birthday(text_fwd)
+        extra  = parse_extra_info(text_fwd)
+
+        if result:
+            day, month = result
+            bd = f"{month:02d}-{day:02d}"
+            conn = get_conn()
+            existing = conn.execute(
+                "SELECT id FROM members WHERE telegram_id=?", (original_user.id,)
+            ).fetchone()
+
+            updates = ["birthday=?", "name=?"]
+            params  = [bd, original_user.full_name]
+            if extra.get("nova_poshta"):
+                updates.append("nova_poshta=?"); params.append(extra["nova_poshta"])
+            if extra.get("instagram"):
+                updates.append("instagram=?"); params.append(extra["instagram"])
+            if extra.get("favorite_color"):
+                updates.append("favorite_color=?"); params.append(extra["favorite_color"])
+
+            if existing:
+                params.append(original_user.id)
+                conn.execute(
+                    f"UPDATE members SET {', '.join(updates)} WHERE telegram_id=?", params
+                )
+                action = "оновлено"
+            else:
+                conn.execute(
+                    "INSERT OR IGNORE INTO members (telegram_id, name, birthday) VALUES (?,?,?)",
+                    (original_user.id, original_user.full_name, bd)
+                )
+                if extra:
+                    params2 = []
+                    upd2 = []
+                    if extra.get("nova_poshta"):
+                        upd2.append("nova_poshta=?"); params2.append(extra["nova_poshta"])
+                    if extra.get("instagram"):
+                        upd2.append("instagram=?"); params2.append(extra["instagram"])
+                    if extra.get("favorite_color"):
+                        upd2.append("favorite_color=?"); params2.append(extra["favorite_color"])
+                    if upd2:
+                        params2.append(original_user.id)
+                        conn.execute(
+                            f"UPDATE members SET {', '.join(upd2)} WHERE telegram_id=?", params2
+                        )
+                action = "додано"
+
+            conn.commit()
+            conn.close()
+
+            extras_str = ""
+            if extra:
+                parts = []
+                if extra.get("nova_poshta"): parts.append(f"📦 {extra['nova_poshta']}")
+                if extra.get("instagram"):   parts.append(f"📸 {extra['instagram']}")
+                if extra.get("favorite_color"): parts.append(f"🎨 {extra['favorite_color']}")
+                extras_str = "\n" + "\n".join(parts)
+
+            await message.reply_text(
+                f"✅ {action.capitalize()}: *{original_user.full_name}*\n"
+                f"🎂 ДН: {day:02d}.{month:02d}{extras_str}",
+                parse_mode="Markdown"
+            )
+        else:
+            await message.reply_text(
+                f"⚠️ Повідомлення від *{message.forward_from.full_name}* — дату не знайдено\n"
+                f"Спробуй: /setbirthday {message.forward_from.first_name} ДД.ММ",
+                parse_mode="Markdown"
+            )
+        return
+
     waiting = context.user_data.get("waiting_for")
-    text    = update.message.text.strip()
+    text    = message.text.strip() if message.text else ""
     user_id = update.effective_user.id
 
     if waiting == "birthday":
