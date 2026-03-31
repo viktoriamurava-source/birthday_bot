@@ -480,6 +480,14 @@ async def send_to_group(context: ContextTypes.DEFAULT_TYPE, text: str,
         logger.info("✅ Надіслано успішно")
     except Exception as e:
         logger.error(f"❌ Помилка надсилання в групу: {e}")
+        # Спробуємо без Markdown
+        try:
+            kwargs_plain = {k: v for k, v in kwargs.items() if k != "parse_mode"}
+            kwargs_plain["text"] = kwargs["text"].replace("*", "").replace("_", "").replace("`", "")
+            await context.bot.send_message(**kwargs_plain)
+            logger.info("✅ Надіслано без Markdown")
+        except Exception as e2:
+            logger.error(f"❌ Помилка навіть без Markdown: {e2}")
 
     # В день ДН — додатково пишемо в гілку привітань (якщо окрема)
     if congrats and CONGRATS_THREAD_ID and CONGRATS_THREAD_ID != write_thread:
