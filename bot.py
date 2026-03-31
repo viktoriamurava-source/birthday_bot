@@ -232,23 +232,14 @@ async def is_member_in_group(bot, telegram_id: int) -> bool:
         return False  # якщо помилка — вважаємо що не в групі
 
 async def get_active_group_members(bot) -> list:
-    """Повертає тільки тих учасниць, які зараз є в групі."""
-    all_active = get_active_members()
-    result = []
-    for m in all_active:
-        if not m["telegram_id"]:
-            continue  # без telegram_id — пропускаємо
-        in_group = await is_member_in_group(bot, m["telegram_id"])
-        if in_group:
-            result.append(m)
-        else:
-            logger.info(f"⚠️ {m['name']} більше не в групі — пропускаємо")
-            # Автоматично деактивуємо
-            conn = get_conn()
-            conn.execute("UPDATE members SET is_active=0 WHERE id=?", (m["id"],))
-            conn.commit()
-            conn.close()
-    return result
+    """Повертає активних учасниць. Перевіряє членство тільки якщо є GROUP_CHAT_ID."""
+    return get_active_members()
+
+async def check_birthday_person_in_group(bot, member: dict) -> bool:
+    """Перевіряє тільки чи іменинниця ще в групі."""
+    if not member.get("telegram_id"):
+        return True
+    return await is_member_in_group(bot, member["telegram_id"])
 
 def get_latest_event() -> Optional[dict]:
     conn = get_conn()
@@ -366,7 +357,8 @@ def text_group_announce(name: str, bd_date: date, count: int, amount: int,
         f"🎀 Дівчата, у нас скоро іменинниця!\n\n"
         f"🌸 {name} святкує день народження {d} {MONTH_GENITIVE_UA[mo]}!"
         f"{extra_lines}\n\n"
-        f"💰 Збираємо {BIRTHDAY_FUND_AMOUNT} грн — по {amount} грн з кожної\n\n"
+        f"💰 Збираємо {BIRTHDAY_FUND_AMOUNT} грн\n"
+        f"👥 Учасниць: {count} — по {amount} грн з кожної\n\n"
         f"Скидаємось сюди 👇\n"
         f"💳 {JAR_LINK}"
     )
@@ -551,14 +543,12 @@ async def daily_birthday_check(context: ContextTypes.DEFAULT_TYPE):
 
 async def _do_announce(context, member: dict, bd_date: date):
     """За 3 дні: анонс у групу + особисті повідомлення."""
-    # Перевіряємо хто зараз в групі
-    active = await get_active_group_members(context.bot)
-
-    # Якщо іменинниця вже не в групі — не збираємо їй на ДН
-    birthday_still_in_group = any(m["id"] == member["id"] for m in active)
-    if not birthday_still_in_group:
+    # Перевіряємо тільки чи іменинниця ще в групі
+    if not await check_birthday_person_in_group(context.bot, member):
         logger.info(f"⚠️ {member['name']} більше не в групі — збір скасовано")
         return
+
+    active = get_active_members()
 
     count  = len(active) - 1  # іменинниця не платить
     if count <= 0:
@@ -859,7 +849,7 @@ async def _ensure_event_exists(context, member: dict, bd_date: date):
     if event_id:
         return event_id
 
-    active = await get_active_group_members(context.bot)
+    active = get_active_members()
     # Іменинниця не платить
     payers = [m for m in active if m["id"] != member["id"]]
     count  = len(payers) if payers else len(active)
