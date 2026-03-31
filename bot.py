@@ -1554,8 +1554,8 @@ async def cmd_activate(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if GROUP_CHAT_ID:
         kwargs = {"chat_id": GROUP_CHAT_ID, "text": text,
                   "parse_mode": "HTML", "reply_markup": keyboard}
-        if BIRTHDAY_THREAD_ID:
-            kwargs["message_thread_id"] = BIRTHDAY_THREAD_ID
+        if GROUP_THREAD_ID:
+            kwargs["message_thread_id"] = GROUP_THREAD_ID
         try:
             await context.bot.send_message(**kwargs)
             await update.message.reply_text("✅ Повідомлення надіслано в групу!")
@@ -1596,8 +1596,8 @@ async def weekly_activation_reminder(context: ContextTypes.DEFAULT_TYPE):
 
     kwargs = {"chat_id": GROUP_CHAT_ID, "text": text,
               "parse_mode": "HTML", "reply_markup": keyboard}
-    if BIRTHDAY_THREAD_ID:
-        kwargs["message_thread_id"] = BIRTHDAY_THREAD_ID
+    if GROUP_THREAD_ID:
+        kwargs["message_thread_id"] = GROUP_THREAD_ID
     try:
         await context.bot.send_message(**kwargs)
         logger.info(f"Щотижневе нагадування надіслано ({no_tg} не активували)")
