@@ -1339,27 +1339,47 @@ async def cmd_force_bday(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Знайдено: {m['name']}, ДН {bd}, через {days_until} дн.\nЗапускаю..."
     )
 
-    # Створюємо подію
-    event_id = await _ensure_event_exists(context, m, bd)
-
-    # Надсилаємо в групу
+    # Рахуємо учасниць і суму
     active = get_active_members()
-    count = len([x for x in active if x["id"] != m["id"]])
+    payers = [x for x in active if x["id"] != m["id"]]
+    count  = len(payers) if payers else len(active)
     amount = round(BIRTHDAY_FUND_AMOUNT / count) if count else BIRTHDAY_FUND_AMOUNT
 
+    # Надсилаємо в групу
+    await update.message.reply_text(f"Надсилаю в групу...")
     if days_until == 0:
         text = text_group_birthday(m["name"], bd, m["id"])
         await send_to_group(context, text, congrats=True)
     elif days_until == 1:
-        paid = count_paid(event_id)
-        total = count
-        text = text_group_day_before(m["name"], bd, paid, total)
+        text = text_group_day_before(m["name"], bd, 0, count)
         await send_to_group(context, text)
     else:
         text = text_group_announce(m["name"], bd, count, amount, member_id=m["id"])
         await send_to_group(context, text)
 
     await update.message.reply_text("Готово! Перевір групу.")
+
+    # Створюємо подію і надсилаємо особисті
+    event_id = get_event_for_member_date(m["id"], bd)
+    if not event_id:
+        event_id = create_event(m, bd, amount, count, active)
+    keyboard = InlineKeyboardMarkup([[
+        InlineKeyboardButton("Я оплатила!", callback_data=f"paid_{event_id}")
+    ]])
+    sent = 0
+    for p in payers:
+        if not p["telegram_id"]:
+            continue
+        try:
+            await context.bot.send_message(
+                chat_id=p["telegram_id"],
+                text=text_personal_announce(m["name"], amount, member_id=m["id"]),
+                reply_markup=keyboard
+            )
+            sent += 1
+        except Exception as ex:
+            logger.warning(f"Не надіслано {p['name']}: {ex}")
+    await update.message.reply_text(f"Особистих надіслано: {sent}")
 
 
 async def cmd_clear_log(update: Update, context: ContextTypes.DEFAULT_TYPE):
