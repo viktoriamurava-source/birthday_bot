@@ -24,7 +24,7 @@ from typing import Optional
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler,
-    MessageHandler, filters, ContextTypes,
+    MessageHandler, ChatMemberHandler, filters, ContextTypes,
 )
 
 # ─── Конфігурація ───────────────────────────────────────────────────────────
@@ -657,6 +657,52 @@ async def _do_day_before(context, member: dict, bd_date: date):
 
 
 # ─── Авто-парсинг з гілки ───────────────────────────────────────────────────
+
+async def handle_new_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Спрацьовує коли нова учасниця приєднується до групи."""
+    result = update.chat_member
+    if not result:
+        return
+
+    # Перевіряємо що це саме наша група
+    if GROUP_CHAT_ID and result.chat.id != GROUP_CHAT_ID:
+        return
+
+    old_status = result.old_chat_member.status
+    new_status = result.new_chat_member.status
+
+    # Нова учасниця = була не в групі, стала member/administrator
+    if old_status in ("left", "kicked", "restricted") and new_status in ("member", "administrator"):
+        user = result.new_chat_member.user
+        if user.is_bot:
+            return
+
+        bot_info = await context.bot.get_me()
+        bot_username = bot_info.username
+
+        # Повідомлення в групу
+        welcome_text = (
+            f"Вітаємо нову учасницю {user.first_name}! 🎉\n\n"
+            f"У нас є бот для збору на дні народження — "
+            f"він автоматично нагадує і відстежує хто здав.\n\n"
+            f"Активуй його щоб отримувати сповіщення 👇"
+        )
+        keyboard = InlineKeyboardMarkup([[
+            InlineKeyboardButton(
+                "Активувати бота",
+                url=f"https://t.me/{bot_username}?start=activate"
+            )
+        ]])
+
+        try:
+            kwargs = {"chat_id": GROUP_CHAT_ID, "text": welcome_text, "reply_markup": keyboard}
+            if GROUP_THREAD_ID:
+                kwargs["message_thread_id"] = GROUP_THREAD_ID
+            await context.bot.send_message(**kwargs)
+            logger.info(f"Привітання надіслано для {user.full_name}")
+        except Exception as e:
+            logger.error(f"Помилка привітання: {e}")
+
 
 async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message
@@ -1712,6 +1758,7 @@ def main():
     app.add_handler(CommandHandler("forcebday",   cmd_force_bday))
     app.add_handler(CallbackQueryHandler(callback_paid, pattern=r"^paid_\d+$"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+    app.add_handler(ChatMemberHandler(handle_new_member, ChatMemberHandler.CHAT_MEMBER))
 
     app.job_queue.run_daily(
         daily_birthday_check,
