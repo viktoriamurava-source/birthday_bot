@@ -879,6 +879,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "/remind       — нагадати боржницям зараз\n"
             "/members      — список учасниць\n"
             "/testcheck    — тест планувальника прямо зараз\n"
+            "/clearlog     — очистити журнал (для повторного тесту)\n"
             "/activate      — надіслати запрошення активувати бота\n"
             "/notactivated  — хто ще не активував\n"
             "/checkactive   — перевірити хто заблокував бота\n"
@@ -1205,6 +1206,20 @@ async def cmd_deactivate(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Введи ім'я учасниці, яку потрібно деактивувати:"
     )
     context.user_data["waiting_for"] = "deactivate_name"
+
+
+async def cmd_clear_log(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/clearlog — очистити журнал нагадувань (щоб testcheck спрацював знову)."""
+    if update.effective_user.id not in ADMIN_IDS:
+        return
+    conn = get_conn()
+    conn.execute("DELETE FROM reminder_log")
+    conn.commit()
+    conn.close()
+    await update.message.reply_text(
+        "✅ Журнал нагадувань очищено!\n\n"
+        "Тепер /testcheck відправить всі актуальні повідомлення."
+    )
 
 
 async def cmd_test_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1585,6 +1600,7 @@ def main():
     app.add_handler(CommandHandler("eventstatus", cmd_event_status))
     app.add_handler(CommandHandler("remind",      cmd_remind))
     app.add_handler(CommandHandler("testcheck",   cmd_test_check))
+    app.add_handler(CommandHandler("clearlog",    cmd_clear_log))
     app.add_handler(CallbackQueryHandler(callback_paid, pattern=r"^paid_\d+$"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
