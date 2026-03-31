@@ -83,6 +83,40 @@ def parse_birthday(text: str) -> Optional[tuple]:
     return None
 
 
+def parse_extra_info(text: str) -> dict:
+    """Парсить з повідомлення: Нова пошта, Instagram, улюблений колір."""
+    result = {}
+    lines = text.split("\n")
+
+    for line in lines:
+        line = line.strip()
+        low = line.lower()
+
+        # Нова пошта: "НП відділення 232", "Нова пошта НП відділення 232" тощо
+        m = re.search(r'(?:нп|нова\s*пошта)[^\d]*(\d+)', low)
+        if m:
+            result["nova_poshta"] = f"НП відділення {m.group(1)}"
+            continue
+
+        # Instagram: @нікнейм або Instagram: нікнейм
+        m = re.search(r'(?:instagram|інстаграм|інста)[:\s]*@?([\w.]+)', low)
+        if m:
+            result["instagram"] = "@" + m.group(1)
+            continue
+        m = re.search(r'@([\w.]{3,30})', line)
+        if m and "instagram" not in result:
+            result["instagram"] = "@" + m.group(1)
+            continue
+
+        # Улюблений колір
+        m = re.search(r'(?:улюблений\s*колір|колір)[:\s]+(.+)', low)
+        if m:
+            result["favorite_color"] = m.group(1).strip().capitalize()
+            continue
+
+    return result
+
+
 # ─── БД ─────────────────────────────────────────────────────────────────────
 DB_PATH = "birthday_fund.db"
 
@@ -101,7 +135,10 @@ def init_db():
             birthday           TEXT,           -- MM-DD
             subscription_until TEXT,           -- YYYY-MM-DD; NULL = безстрокова
             is_active          INTEGER DEFAULT 1,
-            joined_at          TEXT DEFAULT CURRENT_TIMESTAMP
+            joined_at          TEXT DEFAULT CURRENT_TIMESTAMP,
+            nova_poshta        TEXT,
+            instagram          TEXT,
+            favorite_color     TEXT
         );
 
         CREATE TABLE IF NOT EXISTS birthday_events (
@@ -138,6 +175,16 @@ def init_db():
             UNIQUE (member_id, days_before, year, log_type)
         );
     """)
+    # Міграція: додаємо нові колонки якщо їх ще немає
+    for col, definition in [
+        ("nova_poshta",    "TEXT"),
+        ("instagram",      "TEXT"),
+        ("favorite_color", "TEXT"),
+    ]:
+        try:
+            conn.execute(f"ALTER TABLE members ADD COLUMN {col} {definition}")
+        except Exception:
+            pass  # колонка вже існує
     conn.commit()
     conn.close()
     logger.info("✅ БД ініціалізована")
@@ -270,23 +317,64 @@ def create_event(member: dict, bd_date: date, amount: float,
 
 # ─── Тексти повідомлень ─────────────────────────────────────────────────────
 
-def text_group_announce(name: str, bd_date: date, count: int, amount: int) -> str:
+def get_member_info(member_id: int) -> dict:
+    """Повертає додаткову інфу про учасницю."""
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT nova_poshta, instagram, favorite_color FROM members WHERE id=?", (member_id,)
+    ).fetchone()
+    conn.close()
+    return dict(row) if row else {}
+
+def text_group_announce(name: str, bd_date: date, count: int, amount: int,
+                        member_id: int = None) -> str:
     """За 3 дні — анонс у групу."""
     mo = bd_date.month
     d  = bd_date.day
+
+    # Додаткова інфо про іменинницю
+    extra_lines = ""
+    if member_id:
+        info = get_member_info(member_id)
+        parts = []
+        if info.get("nova_poshta"):
+            parts.append(f"📦 {info['nova_poshta']}")
+        if info.get("instagram"):
+            parts.append(f"📸 {info['instagram']}")
+        if info.get("favorite_color"):
+            parts.append(f"🎨 Улюблений колір: {info['favorite_color']}")
+        if parts:
+            extra_lines = "\n\n" + "\n".join(parts)
+
     return (
         f"🎀 Дівчата, у нас скоро іменинниця!\n\n"
-        f"🌸 *{name}* святкує день народження {d} {MONTH_GENITIVE_UA[mo]}!\n\n"
+        f"🌸 *{name}* святкує день народження {d} {MONTH_GENITIVE_UA[mo]}!"
+        f"{extra_lines}\n\n"
         f"💰 Збираємо *{BIRTHDAY_FUND_AMOUNT} грн* — по *{amount} грн* з кожної\n\n"
         f"Скидаємось сюди 👇\n"
         f"💳 {JAR_LINK}"
     )
 
-def text_personal_announce(birthday_name: str, amount: int) -> str:
+def text_personal_announce(birthday_name: str, amount: int,
+                           member_id: int = None) -> str:
     """За 3 дні — особисте повідомлення кожній учасниці."""
+    extra_lines = ""
+    if member_id:
+        info = get_member_info(member_id)
+        parts = []
+        if info.get("nova_poshta"):
+            parts.append(f"📦 Нова пошта: {info['nova_poshta']}")
+        if info.get("instagram"):
+            parts.append(f"📸 Instagram: {info['instagram']}")
+        if info.get("favorite_color"):
+            parts.append(f"🎨 Улюблений колір: {info['favorite_color']}")
+        if parts:
+            extra_lines = "\n\n_Корисна інфо про іменинницю:_\n" + "\n".join(parts)
+
     return (
         f"🎀 У нашій спільноті скоро іменинниця!\n\n"
-        f"🌸 *{birthday_name}* святкує день народження\n\n"
+        f"🌸 *{birthday_name}* святкує день народження"
+        f"{extra_lines}\n\n"
         f"💰 Твоя частина: *{amount} грн*\n\n"
         f"💳 Переказати на банку:\n{JAR_LINK}\n\n"
         f"_Після переказу натисни кнопку нижче — "
@@ -423,7 +511,7 @@ async def _do_announce(context, member: dict, bd_date: date):
         event_id = create_event(member, bd_date, amount, count, active)
 
     # В групу
-    await send_to_group(context, text_group_announce(member["name"], bd_date, count, amount))
+    await send_to_group(context, text_group_announce(member["name"], bd_date, count, amount, member_id=member.get("id")))
 
     # Особисто кожній (крім іменинниці)
     keyboard = InlineKeyboardMarkup([[
@@ -439,7 +527,7 @@ async def _do_announce(context, member: dict, bd_date: date):
         try:
             await context.bot.send_message(
                 chat_id=m["telegram_id"],
-                text=text_personal_announce(member["name"], amount),
+                text=text_personal_announce(member["name"], amount, member_id=member.get("id")),
                 parse_mode="Markdown",
                 reply_markup=keyboard
             )
@@ -526,9 +614,12 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
     is_our_group  = (GROUP_CHAT_ID == 0 or message.chat_id == GROUP_CHAT_ID)
     if not (is_our_group and is_our_thread):
         return
-    user = message.from_user
+
+    # Якщо повідомлення переслане — беремо оригінального автора
+    user = message.forward_from or message.from_user
     if not user:
         return
+
     text   = message.text or message.caption or ""
     result = parse_birthday(text)
     if not result:
@@ -547,9 +638,30 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
             "INSERT OR IGNORE INTO members (telegram_id, name, birthday) VALUES (?,?,?)",
             (user.id, user.full_name, bd)
         )
+    # Парсимо додаткові дані
+    extra = parse_extra_info(text)
+    updates = []
+    params = []
+    if extra.get("nova_poshta"):
+        updates.append("nova_poshta=?")
+        params.append(extra["nova_poshta"])
+    if extra.get("instagram"):
+        updates.append("instagram=?")
+        params.append(extra["instagram"])
+    if extra.get("favorite_color"):
+        updates.append("favorite_color=?")
+        params.append(extra["favorite_color"])
+
+    if updates:
+        params.append(user.id)
+        conn.execute(
+            f"UPDATE members SET {', '.join(updates)} WHERE telegram_id=?", params
+        )
+
     conn.commit()
     conn.close()
-    logger.info(f"Збережено ДН {user.full_name}: {day:02d}.{month:02d}")
+    extras = ", ".join(f"{k}: {v}" for k, v in extra.items()) if extra else "немає"
+    logger.info(f"Збережено ДН {user.full_name}: {day:02d}.{month:02d} | {extras}")
 
 
 # ─── Команди ────────────────────────────────────────────────────────────────
@@ -578,6 +690,9 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "/remind       — нагадати боржницям зараз\n"
             "/members      — список учасниць\n"
             "/testcheck    — тест планувальника прямо зараз\n"
+            "/activate      — надіслати запрошення активувати бота\n"
+            "/notactivated  — хто ще не активував\n"
+            "/checkactive   — перевірити хто заблокував бота\n"
         )
     await update.message.reply_text(text)
 
@@ -647,7 +762,7 @@ async def _launch_manual_event(update, context, person_name: str):
     event_id = create_event(pseudo_member, today, amount, count, active)
 
     # В групу
-    await send_to_group(context, text_group_announce(person_name, today, count, amount))
+    await send_to_group(context, text_group_announce(person_name, today, count, amount, member_id=pseudo_member.get("id")))
 
     # Особисто всім (крім іменинниці)
     keyboard = InlineKeyboardMarkup([[
@@ -974,11 +1089,172 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ─── Запуск ─────────────────────────────────────────────────────────────────
 
+async def cmd_activate(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/activate — бот пише в групу повідомлення з кнопкою активації."""
+    if update.effective_user.id not in ADMIN_IDS:
+        return
+
+    bot_info = await context.bot.get_me()
+    bot_username = bot_info.username
+
+    text = (
+        "👋 Дівчата, у нас є бот для збору на дні народження!\n\n"
+        "🎂 Він автоматично нагадує про ДН, рахує суму і відстежує хто здав.\n\n"
+        "❗️ *Щоб отримувати особисті повідомлення* — потрібно активувати бота.\n\n"
+        "Натисни кнопку нижче 👇"
+    )
+    keyboard = InlineKeyboardMarkup([[
+        InlineKeyboardButton(
+            "🤖 Активувати бота",
+            url=f"https://t.me/{bot_username}?start=activate"
+        )
+    ]])
+
+    if GROUP_CHAT_ID:
+        kwargs = {"chat_id": GROUP_CHAT_ID, "text": text,
+                  "parse_mode": "Markdown", "reply_markup": keyboard}
+        if BIRTHDAY_THREAD_ID:
+            kwargs["message_thread_id"] = BIRTHDAY_THREAD_ID
+        try:
+            await context.bot.send_message(**kwargs)
+            await update.message.reply_text("✅ Повідомлення надіслано в групу!")
+        except Exception as e:
+            await update.message.reply_text(f"❌ Помилка: {e}")
+    else:
+        await update.message.reply_text("❌ GROUP_CHAT_ID не вказано в налаштуваннях")
+
+
+async def weekly_activation_reminder(context: ContextTypes.DEFAULT_TYPE):
+    """Щотижневе нагадування в групу активувати бота — поки не всі підключились."""
+    if not GROUP_CHAT_ID:
+        return
+
+    conn = get_conn()
+    # Рахуємо скільки учасниць ще без telegram_id (не активували)
+    no_tg = conn.execute(
+        "SELECT COUNT(*) as n FROM members WHERE is_active=1 AND telegram_id IS NULL"
+    ).fetchone()["n"]
+    conn.close()
+
+    if no_tg == 0:
+        logger.info("✅ Всі активували бота — щотижневе нагадування не потрібне")
+        return
+
+    bot_info = await context.bot.get_me()
+    bot_username = bot_info.username
+
+    text = (
+        f"👋 Нагадування!\n\n"
+        f"*{no_tg} учасниць* ще не активували бота і не отримуватимуть "
+        f"сповіщення про збори на дні народження.\n\n"
+        f"Це займає 5 секунд 👇"
+    )
+    keyboard = InlineKeyboardMarkup([[
+        InlineKeyboardButton("🤖 Активувати бота", url=f"https://t.me/{bot_username}?start=activate")
+    ]])
+
+    kwargs = {"chat_id": GROUP_CHAT_ID, "text": text,
+              "parse_mode": "Markdown", "reply_markup": keyboard}
+    if BIRTHDAY_THREAD_ID:
+        kwargs["message_thread_id"] = BIRTHDAY_THREAD_ID
+    try:
+        await context.bot.send_message(**kwargs)
+        logger.info(f"Щотижневе нагадування надіслано ({no_tg} не активували)")
+    except Exception as e:
+        logger.error(f"Помилка щотижневого нагадування: {e}")
+
+
+async def cmd_not_activated(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/notactivated — список учасниць які ще не активували бота."""
+    if update.effective_user.id not in ADMIN_IDS:
+        return
+
+    conn = get_conn()
+    # Ті у кого немає telegram_id — взагалі не відомі боту
+    # Ті у кого є telegram_id але вони не написали /start — їх немає в members
+    # Порівнюємо members (хто написав дату в гілці) з тими хто написав /start
+    rows = conn.execute("""
+        SELECT name, telegram_id, birthday FROM members
+        WHERE is_active = 1
+        ORDER BY name
+    """).fetchall()
+    conn.close()
+
+    no_tg = []       # є в базі (додані вручну) але без telegram_id
+    not_started = [] # є telegram_id але ніколи не писали /start (telegram_id є бо парсили з гілки)
+
+    for r in rows:
+        if not r["telegram_id"]:
+            no_tg.append(r["name"])
+
+    # Перевіряємо хто з тих що мають telegram_id — заблокували або не писали /start
+    # Спробуємо надіслати "тихе" повідомлення — якщо помилка, значить не активували
+    # Замість цього просто показуємо тих у кого немає telegram_id або хто не в чаті
+
+    lines = [f"📋 Статус активації бота\n"]
+
+    if no_tg:
+        lines.append(f"❌ Немає в Telegram ({len(no_tg)}) — додані вручну:")
+        for name in no_tg:
+            lines.append(f"  • {name}")
+    else:
+        lines.append("✅ Всі учасниці мають Telegram акаунт")
+
+    lines.append(f"\n💡 Щоб перевірити хто не активував — натисни /checkactive")
+    lines.append(f"\nЩоб нагадати всій групі: /activate")
+
+    await update.message.reply_text("\n".join(lines))
+
+
+async def cmd_check_active(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/checkactive — перевіряє кожну учасницю чи може бот їй написати."""
+    if update.effective_user.id not in ADMIN_IDS:
+        return
+
+    await update.message.reply_text("⏳ Перевіряю... це може зайняти хвилину.")
+
+    conn = get_conn()
+    rows = conn.execute("""
+        SELECT id, name, telegram_id FROM members
+        WHERE is_active = 1 AND telegram_id IS NOT NULL
+    """).fetchall()
+    conn.close()
+
+    cant_reach = []
+    can_reach  = 0
+
+    for r in rows:
+        try:
+            # Пробуємо надіслати "порожню" дію — якщо не заблокували, не буде помилки
+            await context.bot.send_chat_action(
+                chat_id=r["telegram_id"], action="typing"
+            )
+            can_reach += 1
+        except Exception:
+            cant_reach.append(r["name"])
+
+    lines = [
+        f"📊 Результати перевірки:\n",
+        f"✅ Отримають повідомлення: {can_reach}",
+        f"❌ Не активували бота: {len(cant_reach)}\n",
+    ]
+    if cant_reach:
+        lines.append("Ці дівчата не отримають сповіщень:")
+        for name in cant_reach:
+            lines.append(f"  • {name}")
+        lines.append("\nНадіслати нагадування в групу: /activate")
+
+    await update.message.reply_text("\n".join(lines))
+
+
 def main():
     init_db()
     app = Application.builder().token(BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start",       cmd_start))
+    app.add_handler(CommandHandler("activate",    cmd_activate))
+    app.add_handler(CommandHandler("notactivated", cmd_not_activated))
+    app.add_handler(CommandHandler("checkactive",  cmd_check_active))
     app.add_handler(CommandHandler("mybirthday",  cmd_my_birthday))
     app.add_handler(CommandHandler("status",      cmd_status))
     app.add_handler(CommandHandler("birthdays",   cmd_birthdays))
@@ -996,6 +1272,14 @@ def main():
         daily_birthday_check,
         time=dtime(hour=CHECK_HOUR_UTC, minute=0),
         name="daily_check"
+    )
+
+    # Щотижневе нагадування активувати бота (кожної неділі о 10:00 Київ)
+    app.job_queue.run_repeating(
+        weekly_activation_reminder,
+        interval=7 * 24 * 3600,  # 7 днів
+        first=10,                 # перший запуск через 10 секунд після старту
+        name="weekly_activation"
     )
 
     logger.info("🤖 Birthday Fund Bot запущено!")
