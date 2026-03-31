@@ -827,10 +827,14 @@ async def _check_urgent_birthdays(context: ContextTypes.DEFAULT_TYPE):
         m = dict(member)
 
         if days_until == 0 and not already_reminded(m["id"], 0, today.year, "group"):
+            # Створюємо подію якщо немає
+            await _ensure_event_exists(context, m, bd)
             await send_to_group(context, text_group_birthday(m["name"], bd, m["id"]), congrats=True)
             log_reminder(m["id"], 0, today.year, "group")
 
         elif days_until == 1 and not already_reminded(m["id"], 1, today.year, "group"):
+            # Створюємо подію якщо немає (за 3 дні не встигли)
+            await _ensure_event_exists(context, m, bd)
             await _do_day_before(context, m, bd)
             log_reminder(m["id"], 1, today.year, "group")
             log_reminder(m["id"], 1, today.year, "personal")
@@ -839,6 +843,43 @@ async def _check_urgent_birthdays(context: ContextTypes.DEFAULT_TYPE):
             await _do_announce(context, m, bd)
             log_reminder(m["id"], 3, today.year, "group")
             log_reminder(m["id"], 3, today.year, "personal")
+
+
+async def _ensure_event_exists(context, member: dict, bd_date: date):
+    """Створює подію збору якщо її ще немає — для термінових випадків."""
+    event_id = get_event_for_member_date(member["id"], bd_date)
+    if event_id:
+        return event_id
+
+    active = await get_active_group_members(context.bot)
+    # Іменинниця не платить
+    payers = [m for m in active if m["id"] != member["id"]]
+    count  = len(payers) if payers else len(active)
+    amount = round(BIRTHDAY_FUND_AMOUNT / count) if count else BIRTHDAY_FUND_AMOUNT
+
+    event_id = create_event(member, bd_date, amount, count, active)
+    logger.info(f"✅ Створено термінову подію для {member['name']}: event_id={event_id}")
+
+    # Надсилаємо особисті повідомлення
+    keyboard = InlineKeyboardMarkup([[
+        InlineKeyboardButton("✅ Я оплатила!", callback_data=f"paid_{event_id}")
+    ]])
+    sent = 0
+    for m in payers:
+        if not m["telegram_id"]:
+            continue
+        try:
+            await context.bot.send_message(
+                chat_id=m["telegram_id"],
+                text=text_personal_announce(member["name"], amount, member_id=member.get("id")),
+                parse_mode="Markdown",
+                reply_markup=keyboard
+            )
+            sent += 1
+        except Exception as e:
+            logger.warning(f"Не надіслано {m['name']}: {e}")
+    logger.info(f"Особистих повідомлень надіслано: {sent}")
+    return event_id
 
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
