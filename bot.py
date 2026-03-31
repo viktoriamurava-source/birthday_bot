@@ -108,7 +108,7 @@ def parse_extra_info(text: str) -> dict:
         low = line.lower()
 
         # Нова пошта: "НП відділення 232", "Нова пошта НП відділення 232" тощо
-        m = re.search(r'(?:нп|нова\s*пошта)[^\d]*(\d+)', low)
+        m = re.search(r'(?:нп|нова\sпошта)[^\d](\d+)', low)
         if m:
             result["nova_poshta"] = f"НП відділення {m.group(1)}"
             continue
@@ -364,9 +364,9 @@ def text_group_announce(name: str, bd_date: date, count: int, amount: int,
 
     return (
         f"🎀 Дівчата, у нас скоро іменинниця!\n\n"
-        f"🌸 *{name}* святкує день народження {d} {MONTH_GENITIVE_UA[mo]}!"
+        f"🌸 {name} святкує день народження {d} {MONTH_GENITIVE_UA[mo]}!"
         f"{extra_lines}\n\n"
-        f"💰 Збираємо *{BIRTHDAY_FUND_AMOUNT} грн* — по *{amount} грн* з кожної\n\n"
+        f"💰 Збираємо {BIRTHDAY_FUND_AMOUNT} грн — по {amount} грн з кожної\n\n"
         f"Скидаємось сюди 👇\n"
         f"💳 {JAR_LINK}"
     )
@@ -389,9 +389,9 @@ def text_personal_announce(birthday_name: str, amount: int,
 
     return (
         f"🎀 У нашій спільноті скоро іменинниця!\n\n"
-        f"🌸 *{birthday_name}* святкує день народження"
+        f"🌸 {birthday_name} святкує день народження"
         f"{extra_lines}\n\n"
-        f"💰 Твоя частина: *{amount} грн*\n\n"
+        f"💰 Твоя частина: {amount} грн\n\n"
         f"💳 Переказати на банку:\n{JAR_LINK}\n\n"
         f"_Після переказу натисни кнопку нижче — "
         f"так ми бачимо загальну картину збору_ 🙏"
@@ -403,10 +403,10 @@ def text_group_day_before(name: str, bd_date: date,
     percent = round(paid / total * 100) if total else 0
     remaining = total - paid
     return (
-        f"⏰ Нагадування — *завтра* день народження!\n\n"
-        f"🌸 *{name}* ({bd_date.strftime('%d.%m')})\n\n"
-        f"📊 Вже здали: *{paid} із {total}* ({percent}%)\n"
-        f"❌ Ще не здали: *{remaining}*\n\n"
+        f"⏰ Нагадування — завтра день народження!\n\n"
+        f"🌸 {name} ({bd_date.strftime('%d.%m')})\n\n"
+        f"📊 Вже здали: {paid} із {total} ({percent}%)\n"
+        f"❌ Ще не здали: {remaining}\n\n"
         f"Дівчата, хто ще не встиг — перевірте особисті повідомлення 💳"
     )
 
@@ -414,10 +414,10 @@ def text_personal_reminder(birthday_name: str, bd_date: date, amount: int) -> st
     """За 1 день — нагадування боржниці в особисті."""
     return (
         f"👋 Нагадуємо!\n\n"
-        f"Твій внесок на день народження *{birthday_name}* "
+        f"Твій внесок на день народження {birthday_name} "
         f"({bd_date.strftime('%d.%m')}) ще не зафіксовано.\n\n"
-        f"⚠️ *Завтра* вже день народження — встигни сьогодні!\n\n"
-        f"💰 Сума: *{amount} грн*\n"
+        f"⚠️ Завтра вже день народження — встигни сьогодні!\n\n"
+        f"💰 Сума: {amount} грн\n"
         f"💳 {JAR_LINK}\n\n"
         f"Після переказу натисни кнопку ↓"
     )
@@ -436,21 +436,21 @@ def text_group_birthday(name: str, bd_date: date, member_id: int = None) -> str:
     mo  = bd_date.month
     d   = bd_date.day
     age = get_member_age(member_id, bd_date) if member_id else None
-    age_str = f"\n🎈 Виповнюється *{age} років*!" if age else ""
+    age_str = f"\n🎈 Виповнюється {age} років!" if age else ""
     return (
         f"🎂 Сьогодні день народження!\n\n"
-        f"🌸 Наша улюблена *{name}* святкує {d} {MONTH_GENITIVE_UA[mo]}!{age_str}\n\n"
+        f"🌸 Наша улюблена {name} святкує {d} {MONTH_GENITIVE_UA[mo]}!{age_str}\n\n"
         f"Дівчата, давайте всі разом привітаємо іменинницю! 🥳🎉\n\n"
-        f"З днем народження, *{name}*! 💐"
+        f"З днем народження, {name}! 💐"
     )
 
 def text_remind_manual(birthday_name: str, bd_date: date, amount: int) -> str:
     """Ручне нагадування (команда /remind)."""
     return (
         f"👋 Нагадуємо!\n\n"
-        f"Внесок на день народження *{birthday_name}* "
+        f"Внесок на день народження {birthday_name} "
         f"({bd_date.strftime('%d.%m')}) ще не зафіксовано.\n\n"
-        f"💰 Сума: *{amount} грн*\n"
+        f"💰 Сума: {amount} грн\n"
         f"💳 {JAR_LINK}\n\n"
         f"Після переказу натисни кнопку ↓"
     )
@@ -471,10 +471,10 @@ async def send_to_group(context: ContextTypes.DEFAULT_TYPE, text: str,
     # Визначаємо куди писати
     write_thread = GROUP_THREAD_ID  # гілка спілкування
 
-    kwargs = {"chat_id": GROUP_CHAT_ID, "text": text, "parse_mode": "Markdown"}
+    kwargs = {"chat_id": GROUP_CHAT_ID, "text": text, "parse_mode": "HTML"}
     if write_thread:
         kwargs["message_thread_id"] = write_thread
-    logger.info(f"📤 Надсилаю в групу: chat_id={GROUP_CHAT_ID}, thread={write_thread}")
+    logger.info(f"📤 Надсилаю в групу: chat_id={GROUPCHAT_ID}, thread={writethread}")
     try:
         await context.bot.send_message(**kwargs)
         logger.info("✅ Надіслано успішно")
@@ -491,7 +491,7 @@ async def send_to_group(context: ContextTypes.DEFAULT_TYPE, text: str,
 
     # В день ДН — додатково пишемо в гілку привітань (якщо окрема)
     if congrats and CONGRATS_THREAD_ID and CONGRATS_THREAD_ID != write_thread:
-        kwargs2 = {"chat_id": GROUP_CHAT_ID, "text": text, "parse_mode": "Markdown",
+        kwargs2 = {"chat_id": GROUP_CHAT_ID, "text": text, "parse_mode": "HTML",
                    "message_thread_id": CONGRATS_THREAD_ID}
         try:
             await context.bot.send_message(**kwargs2)
@@ -575,7 +575,7 @@ async def _do_announce(context, member: dict, bd_date: date):
 
     # Особисто кожній (крім іменинниці)
     keyboard = InlineKeyboardMarkup([[
-        InlineKeyboardButton("✅ Я оплатила!", callback_data=f"paid_{event_id}")
+        InlineKeyboardButton("✅ Я оплатила!", callback_data=f"paid{event_id}")
     ]])
     sent, failed = 0, 0
     for m in active:
@@ -588,7 +588,7 @@ async def _do_announce(context, member: dict, bd_date: date):
             await context.bot.send_message(
                 chat_id=m["telegram_id"],
                 text=text_personal_announce(member["name"], amount, member_id=member.get("id")),
-                parse_mode="Markdown",
+                parse_mode="HTML",
                 reply_markup=keyboard
             )
             sent += 1
@@ -629,7 +629,7 @@ async def _do_day_before(context, member: dict, bd_date: date):
         return
 
     keyboard = InlineKeyboardMarkup([[
-        InlineKeyboardButton("✅ Я оплатила!", callback_data=f"paid_{event_id}")
+        InlineKeyboardButton("✅ Я оплатила!", callback_data=f"paid{event_id}")
     ]])
     sent = 0
     for u in unpaid:
@@ -639,7 +639,7 @@ async def _do_day_before(context, member: dict, bd_date: date):
             await context.bot.send_message(
                 chat_id=u["telegram_id"],
                 text=text_personal_reminder(member["name"], bd_date, amount),
-                parse_mode="Markdown",
+                parse_mode="HTML",
                 reply_markup=keyboard
             )
             sent += 1
@@ -653,12 +653,12 @@ async def _do_day_before(context, member: dict, bd_date: date):
             await context.bot.send_message(
                 chat_id=admin_id,
                 text=(
-                    f"📋 Боржниці — ДН *{member['name']}* "
+                    f"📋 Боржниці — ДН {member['name']} "
                     f"({bd_date.strftime('%d.%m')})\n\n"
                     f"❌ Не оплатили ({len(unpaid)}/{total}):\n{names_list}\n\n"
                     f"Нагадати вручну: /remind"
                 ),
-                parse_mode="Markdown"
+                parse_mode="HTML"
             )
         except Exception:
             pass
@@ -698,7 +698,7 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
         yr_update = ", birth_year=?" if birth_year else ""
         yr_params = [birth_year] if birth_year else []
         params = [bd, user.full_name] + yr_params + [user.id]
-        conn.execute(f"UPDATE members SET birthday=?, name=?{yr_update} WHERE telegram_id=?", params)
+        conn.execute(f"UPDATE members SET birthday=?, name=?{yr_update} WHERE telegramid=?", params)
     else:
         conn.execute(
             "INSERT OR IGNORE INTO members (telegram_id, name, birthday) VALUES (?,?,?)",
@@ -756,10 +756,10 @@ async def _handle_onboarding(update: Update, context: ContextTypes.DEFAULT_TYPE,
             yr_str = f".{year}" if year else ""
             await update.message.reply_text(
                 f"✅ ДН збережено: {day:02d}.{month:02d}{yr_str}\n\n"
-                f"Тепер напиши своє *відділення Нової пошти*\n"
+                f"Тепер напиши своє відділення Нової пошти\n"
                 f"Наприклад: НП відділення 47, Київ\n\n"
-                f"_(або напиши «-» щоб пропустити)_",
-                parse_mode="Markdown"
+                f"_(або напиши «-» щоб пропустити)",
+                parse_mode="HTML"
             )
         else:
             await update.message.reply_text(
@@ -775,10 +775,10 @@ async def _handle_onboarding(update: Update, context: ContextTypes.DEFAULT_TYPE,
         context.user_data["onboarding_step"] = "instagram"
         await update.message.reply_text(
             "✅ Збережено!\n\n"
-            "Напиши свій *Instagram* нікнейм\n"
+            "Напиши свій Instagram нікнейм\n"
             "Наприклад: @kateryna_pet\n\n"
             "_(або напиши «-» щоб пропустити)_",
-            parse_mode="Markdown"
+            parse_mode="HTML"
         )
 
     elif step == "instagram":
@@ -791,10 +791,10 @@ async def _handle_onboarding(update: Update, context: ContextTypes.DEFAULT_TYPE,
         context.user_data["onboarding_step"] = "color"
         await update.message.reply_text(
             "✅ Збережено!\n\n"
-            "Останній крок — напиши свій *улюблений колір* 🎨\n"
+            "Останній крок — напиши свій улюблений колір 🎨\n"
             "Наприклад: лавандовий\n\n"
             "_(або напиши «-» щоб пропустити)_",
-            parse_mode="Markdown"
+            parse_mode="HTML"
         )
 
     elif step == "color":
@@ -866,11 +866,11 @@ async def _ensure_event_exists(context, member: dict, bd_date: date):
     amount = round(BIRTHDAY_FUND_AMOUNT / count) if count else BIRTHDAY_FUND_AMOUNT
 
     event_id = create_event(member, bd_date, amount, count, active)
-    logger.info(f"✅ Створено термінову подію для {member['name']}: event_id={event_id}")
+    logger.info(f"✅ Створено термінову подію для {member['name']}: event_id={eventid}")
 
     # Надсилаємо особисті повідомлення
     keyboard = InlineKeyboardMarkup([[
-        InlineKeyboardButton("✅ Я оплатила!", callback_data=f"paid_{event_id}")
+        InlineKeyboardButton("✅ Я оплатила!", callback_data=f"paid{event_id}")
     ]])
     sent = 0
     for m in payers:
@@ -880,7 +880,7 @@ async def _ensure_event_exists(context, member: dict, bd_date: date):
             await context.bot.send_message(
                 chat_id=m["telegram_id"],
                 text=text_personal_announce(member["name"], amount, member_id=member.get("id")),
-                parse_mode="Markdown",
+                parse_mode="HTML",
                 reply_markup=keyboard
             )
             sent += 1
@@ -913,9 +913,9 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"Привіт, {user.first_name}! 👋\n\n"
             "Я допомагаю збирати на дні народження в нашій спільноті 🎂\n\n"
             "Давай заповнимо твою анкету — це займе 1 хвилину!\n\n"
-            "Напиши свій *день народження* у форматі ДД.ММ.РРРР\n"
+            "Напиши свій день народження у форматі ДД.ММ.РРРР\n"
             "Наприклад: 25.04.1995",
-            parse_mode="Markdown"
+            parse_mode="HTML"
         )
         context.user_data["onboarding_step"] = "birthday"
         return
@@ -962,11 +962,11 @@ async def cmd_my_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if row["birthday"]:
         parts = row["birthday"].split("-")
         mo, d = int(parts[-2]), int(parts[-1])
-        yr = f".{row['birth_year']}" if row["birth_year"] else ""
+        yr = f".{row['birth_year']}" if row["birthyear"] else ""
         bd_str = f"{d:02d}.{mo:02d}{yr}"
 
     lines = [
-        f"📋 *Твоя анкета:*\n",
+        f"📋 Твоя анкета:\n",
         f"👤 Ім'я: {row['name']}",
         f"🎂 ДН: {bd_str}",
         f"📦 Нова пошта: {row['nova_poshta'] or 'не вказано'}",
@@ -974,17 +974,17 @@ async def cmd_my_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🎨 Улюблений колір: {row['favorite_color'] or 'не вказано'}",
         f"\nЩоб оновити — напиши /editinfo",
     ]
-    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+    await update.message.reply_text("\n".join(lines), parse_mode="HTML")
 
 
 async def cmd_edit_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """/editinfo — оновити свою анкету."""
     await update.message.reply_text(
         "✏️ Оновлення анкети\n\n"
-        "Напиши свій *день народження* у форматі ДД.ММ.РРРР\n"
+        "Напиши свій день народження у форматі ДД.ММ.РРРР\n"
         "Наприклад: 25.04.1995\n\n"
         "_(або ДД.ММ якщо не хочеш вказувати рік)_",
-        parse_mode="Markdown"
+        parse_mode="HTML"
     )
     context.user_data["onboarding_step"] = "birthday"
 
@@ -1020,7 +1020,7 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for r in rows:
         icon = "✅" if r["paid"] else "❌"
         lines.append(
-            f"{icon} ДН {r['birthday_person_name']} "
+            f"{icon} ДН {r['birthday_personname']} "
             f"({r['event_date']}) — {r['amount']:.0f} грн"
         )
     await update.message.reply_text("\n".join(lines))
@@ -1058,7 +1058,7 @@ async def _launch_manual_event(update, context, person_name: str):
 
     # Особисто всім (крім іменинниці)
     keyboard = InlineKeyboardMarkup([[
-        InlineKeyboardButton("✅ Я оплатила!", callback_data=f"paid_{event_id}")
+        InlineKeyboardButton("✅ Я оплатила!", callback_data=f"paid{event_id}")
     ]])
     sent, failed = 0, 0
     for m in payers:
@@ -1069,7 +1069,7 @@ async def _launch_manual_event(update, context, person_name: str):
             await context.bot.send_message(
                 chat_id=m["telegram_id"],
                 text=text_personal_announce(person_name, amount),
-                parse_mode="Markdown",
+                parse_mode="HTML",
                 reply_markup=keyboard
             )
             sent += 1
@@ -1106,8 +1106,8 @@ async def cmd_event_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     percent     = round(len(paid_rows) / total * 100) if total else 0
 
     lines = [
-        f"📊 ДН *{event['birthday_person_name']}* | {event['event_date']}",
-        f"💰 {event['amount_per_person']:.0f} грн × {total} = {BIRTHDAY_FUND_AMOUNT} грн",
+        f"📊 ДН {event['birthday_personname']} | {event['event_date']}",
+        f"💰 {event['amount_perperson']:.0f} грн × {total} = {BIRTHDAY_FUND_AMOUNT} грн",
         f"💵 Зібрано: {collected:.0f} / {BIRTHDAY_FUND_AMOUNT} грн ({percent}%)\n",
         f"✅ Оплатили ({len(paid_rows)}):",
     ]
@@ -1117,7 +1117,7 @@ async def cmd_event_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for r in unpaid_rows:
         lines.append(f"  • {r['name']}")
 
-    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+    await update.message.reply_text("\n".join(lines), parse_mode="HTML")
 
 
 async def cmd_remind(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1140,7 +1140,7 @@ async def cmd_remind(update: Update, context: ContextTypes.DEFAULT_TYPE):
     paid    = count_paid(event["id"])
 
     keyboard = InlineKeyboardMarkup([[
-        InlineKeyboardButton("✅ Я оплатила!", callback_data=f"paid_{event['id']}")
+        InlineKeyboardButton("✅ Я оплатила!", callback_data=f"paid{event['id']}")
     ]])
 
     # Особисті нагадування
@@ -1152,7 +1152,7 @@ async def cmd_remind(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await context.bot.send_message(
                 chat_id=u["telegram_id"],
                 text=text_remind_manual(event["birthday_person_name"], bd_date, amount),
-                parse_mode="Markdown",
+                parse_mode="HTML",
                 reply_markup=keyboard
             )
             sent += 1
@@ -1186,7 +1186,7 @@ async def cmd_set_birthday_admin(update: Update, context: ContextTypes.DEFAULT_T
     date_str = " ".join(context.args[1:])
     result   = parse_birthday(date_str)
     if not result:
-        await update.message.reply_text(f"❌ Не розпізнала дату: «{date_str}»")
+        await update.message.reply_text(f"❌ Не розпізнала дату: «{datestr}»")
         return
     day, month = result
     bd = f"{month:02d}-{day:02d}"
@@ -1227,7 +1227,7 @@ async def cmd_birthdays(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     lines = ["🎂 Дні народження учасниць:\n"]
     for mo in sorted(by_month.keys()):
-        lines.append(f"📅 {MONTH_NAMES_UA[mo]}:")
+        lines.append(f"📅 {MONTH_NAMESUA[mo]}:")
         for d, name in sorted(by_month[mo]):
             try:
                 bd = date(today.year, mo, d)
@@ -1339,9 +1339,9 @@ async def callback_paid(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             await context.bot.send_message(
                 admin_id,
-                f"💰 *{query.from_user.full_name}* відмітила оплату\n"
+                f"💰 {query.from_user.fullname} відмітила оплату\n"
                 f"🎂 ДН {bd_name}",
-                parse_mode="Markdown"
+                parse_mode="HTML"
             )
         except Exception:
             pass
@@ -1415,21 +1415,21 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             extras_str = ""
             if extra:
                 parts = []
-                if extra.get("nova_poshta"): parts.append(f"📦 {extra['nova_poshta']}")
+                if extra.get("nova_poshta"): parts.append(f"📦 {extra['novaposhta']}")
                 if extra.get("instagram"):   parts.append(f"📸 {extra['instagram']}")
-                if extra.get("favorite_color"): parts.append(f"🎨 {extra['favorite_color']}")
+                if extra.get("favorite_color"): parts.append(f"🎨 {extra['favoritecolor']}")
                 extras_str = "\n" + "\n".join(parts)
 
             await message.reply_text(
-                f"✅ {action.capitalize()}: *{original_user.full_name}*\n"
+                f"✅ {action.capitalize()}: {original_user.fullname}\n"
                 f"🎂 ДН: {day:02d}.{month:02d}{extras_str}",
-                parse_mode="Markdown"
+                parse_mode="HTML"
             )
         else:
             await message.reply_text(
-                f"⚠️ Повідомлення від *{message.forward_from.full_name}* — дату не знайдено\n"
-                f"Спробуй: /setbirthday {message.forward_from.first_name} ДД.ММ",
-                parse_mode="Markdown"
+                f"⚠️ Повідомлення від {message.forward_from.fullname} — дату не знайдено\n"
+                f"Спробуй: /setbirthday {message.forward_from.firstname} ДД.ММ",
+                parse_mode="HTML"
             )
         return
 
@@ -1491,7 +1491,7 @@ async def cmd_activate(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
         "👋 Дівчата, у нас є бот для збору на дні народження!\n\n"
         "🎂 Він автоматично нагадує про ДН, рахує суму і відстежує хто здав.\n\n"
-        "❗️ *Щоб отримувати особисті повідомлення* — потрібно активувати бота.\n\n"
+        "❗️ Щоб отримувати особисті повідомлення — потрібно активувати бота.\n\n"
         "Натисни кнопку нижче 👇"
     )
     keyboard = InlineKeyboardMarkup([[
@@ -1503,7 +1503,7 @@ async def cmd_activate(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if GROUP_CHAT_ID:
         kwargs = {"chat_id": GROUP_CHAT_ID, "text": text,
-                  "parse_mode": "Markdown", "reply_markup": keyboard}
+                  "parse_mode": "HTML", "reply_markup": keyboard}
         if BIRTHDAY_THREAD_ID:
             kwargs["message_thread_id"] = BIRTHDAY_THREAD_ID
         try:
@@ -1536,7 +1536,7 @@ async def weekly_activation_reminder(context: ContextTypes.DEFAULT_TYPE):
 
     text = (
         f"👋 Нагадування!\n\n"
-        f"*{no_tg} учасниць* ще не активували бота і не отримуватимуть "
+        f"{no_tg} учасниць ще не активували бота і не отримуватимуть "
         f"сповіщення про збори на дні народження.\n\n"
         f"Це займає 5 секунд 👇"
     )
@@ -1545,7 +1545,7 @@ async def weekly_activation_reminder(context: ContextTypes.DEFAULT_TYPE):
     ]])
 
     kwargs = {"chat_id": GROUP_CHAT_ID, "text": text,
-              "parse_mode": "Markdown", "reply_markup": keyboard}
+              "parse_mode": "HTML", "reply_markup": keyboard}
     if BIRTHDAY_THREAD_ID:
         kwargs["message_thread_id"] = BIRTHDAY_THREAD_ID
     try:
