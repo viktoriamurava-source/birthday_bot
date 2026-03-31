@@ -718,6 +718,84 @@ async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYP
 
 # ─── Команди ────────────────────────────────────────────────────────────────
 
+async def _handle_onboarding(update: Update, context: ContextTypes.DEFAULT_TYPE,
+                              step: str, text: str):
+    """Покроковий збір анкети при першій активації."""
+    user_id = update.effective_user.id
+
+    if step == "birthday":
+        # Парсимо дату — підтримуємо ДД.ММ і ДД.ММ.РРРР
+        result = parse_birthday(text)
+        year   = parse_birth_year(text)
+        if result:
+            day, month = result
+            bd = f"{month:02d}-{day:02d}"
+            conn = get_conn()
+            conn.execute("UPDATE members SET birthday=? WHERE telegram_id=?", (bd, user_id))
+            if year:
+                conn.execute("UPDATE members SET birth_year=? WHERE telegram_id=?", (year, user_id))
+            conn.commit()
+            conn.close()
+            context.user_data["onboarding_step"] = "nova_poshta"
+            yr_str = f".{year}" if year else ""
+            await update.message.reply_text(
+                f"✅ ДН збережено: {day:02d}.{month:02d}{yr_str}\n\n"
+                f"Тепер напиши своє *відділення Нової пошти*\n"
+                f"Наприклад: НП відділення 47, Київ\n\n"
+                f"_(або напиши «-» щоб пропустити)_",
+                parse_mode="Markdown"
+            )
+        else:
+            await update.message.reply_text(
+                "❌ Не розпізнала дату. Спробуй формат: 25.04.1995 або 25.04"
+            )
+
+    elif step == "nova_poshta":
+        if text != "-":
+            conn = get_conn()
+            conn.execute("UPDATE members SET nova_poshta=? WHERE telegram_id=?", (text, user_id))
+            conn.commit()
+            conn.close()
+        context.user_data["onboarding_step"] = "instagram"
+        await update.message.reply_text(
+            "✅ Збережено!\n\n"
+            "Напиши свій *Instagram* нікнейм\n"
+            "Наприклад: @kateryna_pet\n\n"
+            "_(або напиши «-» щоб пропустити)_",
+            parse_mode="Markdown"
+        )
+
+    elif step == "instagram":
+        if text != "-":
+            insta = text if text.startswith("@") else "@" + text
+            conn = get_conn()
+            conn.execute("UPDATE members SET instagram=? WHERE telegram_id=?", (insta, user_id))
+            conn.commit()
+            conn.close()
+        context.user_data["onboarding_step"] = "color"
+        await update.message.reply_text(
+            "✅ Збережено!\n\n"
+            "Останній крок — напиши свій *улюблений колір* 🎨\n"
+            "Наприклад: лавандовий\n\n"
+            "_(або напиши «-» щоб пропустити)_",
+            parse_mode="Markdown"
+        )
+
+    elif step == "color":
+        if text != "-":
+            conn = get_conn()
+            conn.execute("UPDATE members SET favorite_color=? WHERE telegram_id=?", (text, user_id))
+            conn.commit()
+            conn.close()
+        context.user_data.pop("onboarding_step", None)
+        await update.message.reply_text(
+            "🎉 Анкету заповнено! Дякуємо!\n\n"
+            "Тепер ти будеш отримувати повідомлення про дні народження в нашій спільноті 🎂\n\n"
+            "/myinfo — переглянути свою анкету\n"
+            "/status — мої оплати",
+        )
+
+
 async def _check_urgent_birthdays(context: ContextTypes.DEFAULT_TYPE):
     """При активації нового користувача перевіряємо чи є термінові ДН (сьогодні/завтра)."""
     today = date.today()
@@ -757,19 +835,39 @@ async def _check_urgent_birthdays(context: ContextTypes.DEFAULT_TYPE):
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     conn = get_conn()
+    existing = conn.execute(
+        "SELECT id, birthday, nova_poshta, instagram, favorite_color FROM members WHERE telegram_id=?",
+        (user.id,)
+    ).fetchone()
     conn.execute("INSERT OR IGNORE INTO members (telegram_id, name) VALUES (?,?)",
                  (user.id, user.full_name))
     conn.commit()
     conn.close()
 
-    # Перевіряємо чи є ДН сьогодні або завтра — якщо так, запускаємо відповідні повідомлення
     await _check_urgent_birthdays(context)
+
+    # Якщо нова учасниця (або не заповнила анкету) — запускаємо онбординг
+    is_new = not existing
+    needs_onboarding = is_new or (existing and not existing["birthday"])
+
+    if needs_onboarding and user.id not in ADMIN_IDS:
+        await update.message.reply_text(
+            f"Привіт, {user.first_name}! 👋\n\n"
+            "Я допомагаю збирати на дні народження в нашій спільноті 🎂\n\n"
+            "Давай заповнимо твою анкету — це займе 1 хвилину!\n\n"
+            "Напиши свій *день народження* у форматі ДД.ММ.РРРР\n"
+            "Наприклад: 25.04.1995",
+            parse_mode="Markdown"
+        )
+        context.user_data["onboarding_step"] = "birthday"
+        return
 
     text = (
         f"Привіт, {user.first_name}! 👋\n\n"
         "Я стежу за днями народження в нашій спільноті 🎂\n\n"
-        "/mybirthday — вказати свій ДН\n"
+        "/mybirthday — оновити свій ДН\n"
         "/status     — мої оплати\n"
+        "/myinfo     — моя анкета\n"
     )
     if user.id in ADMIN_IDS:
         text += (
@@ -786,6 +884,50 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "/checkactive   — перевірити хто заблокував бота\n"
         )
     await update.message.reply_text(text)
+
+
+async def cmd_my_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/myinfo — показати свою анкету."""
+    user_id = update.effective_user.id
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT name, birthday, birth_year, nova_poshta, instagram, favorite_color FROM members WHERE telegram_id=?",
+        (user_id,)
+    ).fetchone()
+    conn.close()
+    if not row:
+        await update.message.reply_text("Тебе ще немає в системі. Напиши /start")
+        return
+
+    bd_str = "не вказано"
+    if row["birthday"]:
+        parts = row["birthday"].split("-")
+        mo, d = int(parts[-2]), int(parts[-1])
+        yr = f".{row['birth_year']}" if row["birth_year"] else ""
+        bd_str = f"{d:02d}.{mo:02d}{yr}"
+
+    lines = [
+        f"📋 *Твоя анкета:*\n",
+        f"👤 Ім'я: {row['name']}",
+        f"🎂 ДН: {bd_str}",
+        f"📦 Нова пошта: {row['nova_poshta'] or 'не вказано'}",
+        f"📸 Instagram: {row['instagram'] or 'не вказано'}",
+        f"🎨 Улюблений колір: {row['favorite_color'] or 'не вказано'}",
+        f"\nЩоб оновити — напиши /editinfo",
+    ]
+    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+
+async def cmd_edit_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/editinfo — оновити свою анкету."""
+    await update.message.reply_text(
+        "✏️ Оновлення анкети\n\n"
+        "Напиши свій *день народження* у форматі ДД.ММ.РРРР\n"
+        "Наприклад: 25.04.1995\n\n"
+        "_(або ДД.ММ якщо не хочеш вказувати рік)_",
+        parse_mode="Markdown"
+    )
+    context.user_data["onboarding_step"] = "birthday"
 
 
 async def cmd_my_birthday(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1218,6 +1360,13 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         return
 
+    # Онбординг — покроковий збір анкети
+    onboarding_step = context.user_data.get("onboarding_step")
+    if onboarding_step:
+        text_raw = message.text.strip() if message.text else ""
+        await _handle_onboarding(update, context, onboarding_step, text_raw)
+        return
+
     waiting = context.user_data.get("waiting_for")
     text    = message.text.strip() if message.text else ""
     user_id = update.effective_user.id
@@ -1425,6 +1574,8 @@ def main():
     app.add_handler(CommandHandler("notactivated", cmd_not_activated))
     app.add_handler(CommandHandler("checkactive",  cmd_check_active))
     app.add_handler(CommandHandler("mybirthday",  cmd_my_birthday))
+    app.add_handler(CommandHandler("myinfo",      cmd_my_info))
+    app.add_handler(CommandHandler("editinfo",    cmd_edit_info))
     app.add_handler(CommandHandler("status",      cmd_status))
     app.add_handler(CommandHandler("birthdays",   cmd_birthdays))
     app.add_handler(CommandHandler("members",     cmd_members))
