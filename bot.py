@@ -474,10 +474,12 @@ async def send_to_group(context: ContextTypes.DEFAULT_TYPE, text: str,
     kwargs = {"chat_id": GROUP_CHAT_ID, "text": text, "parse_mode": "Markdown"}
     if write_thread:
         kwargs["message_thread_id"] = write_thread
+    logger.info(f"📤 Надсилаю в групу: chat_id={GROUP_CHAT_ID}, thread={write_thread}")
     try:
         await context.bot.send_message(**kwargs)
+        logger.info("✅ Надіслано успішно")
     except Exception as e:
-        logger.error(f"Помилка надсилання в групу: {e}")
+        logger.error(f"❌ Помилка надсилання в групу: {e}")
 
     # В день ДН — додатково пишемо в гілку привітань (якщо окрема)
     if congrats and CONGRATS_THREAD_ID and CONGRATS_THREAD_ID != write_thread:
@@ -494,6 +496,7 @@ async def send_to_group(context: ContextTypes.DEFAULT_TYPE, text: str,
 async def daily_birthday_check(context: ContextTypes.DEFAULT_TYPE):
     today = date.today()
     logger.info(f"⏰ Перевірка ДН: {today}")
+    logger.info(f"GROUP_CHAT_ID={GROUP_CHAT_ID} GROUP_THREAD_ID={GROUP_THREAD_ID} BIRTHDAY_THREAD_ID={BIRTHDAY_THREAD_ID}")
 
     conn = get_conn()
     all_members = conn.execute("""
@@ -501,6 +504,7 @@ async def daily_birthday_check(context: ContextTypes.DEFAULT_TYPE):
         FROM members WHERE is_active = 1 AND birthday IS NOT NULL
     """).fetchall()
     conn.close()
+    logger.info(f"Знайдено учасниць з ДН: {len(all_members)}")
 
     for member in all_members:
         parts = member["birthday"].split("-")
@@ -517,6 +521,7 @@ async def daily_birthday_check(context: ContextTypes.DEFAULT_TYPE):
 
         days_until = (bd - today).days
         m = dict(member)
+        logger.info(f"  {m['name']}: ДН {bd}, через {days_until} дн.")
 
         # ── За 3 дні: анонс у групу + особисті всім ────────────────────────
         if days_until == 3 and not already_reminded(m["id"], 3, today.year, "group"):
@@ -584,6 +589,9 @@ async def _do_announce(context, member: dict, bd_date: date):
             failed += 1
 
     logger.info(f"Анонс ДН {member['name']}: надіслано {sent}, помилок {failed}")
+
+async def _debug_send_test(context, member, days_until, bd):
+    logger.info(f"🔍 Знайдено: {member['name']} ДН {bd} — через {days_until} дн.")
 
 
 async def _do_day_before(context, member: dict, bd_date: date):
