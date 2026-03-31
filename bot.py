@@ -1266,6 +1266,66 @@ async def cmd_deactivate(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["waiting_for"] = "deactivate_name"
 
 
+async def cmd_force_bday(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/forcebday Ім'я — примусово запустити збір для конкретної людини."""
+    if update.effective_user.id not in ADMIN_IDS:
+        return
+    if not context.args:
+        await update.message.reply_text("Формат: /forcebday Ім'я\nНаприклад: /forcebday Женя")
+        return
+
+    name = " ".join(context.args)
+    conn = get_conn()
+    member = conn.execute(
+        "SELECT * FROM members WHERE LOWER(name) LIKE LOWER(?)", (f"%{name}%",)
+    ).fetchone()
+    conn.close()
+
+    if not member:
+        await update.message.reply_text(f"Не знайдено: {name}")
+        return
+
+    m = dict(member)
+    parts = m["birthday"].split("-")
+    month, day = int(parts[-2]), int(parts[-1])
+    today = date.today()
+    try:
+        bd = date(today.year, month, day)
+    except ValueError:
+        await update.message.reply_text("Помилка дати")
+        return
+
+    if bd < today:
+        bd = date(today.year + 1, month, day)
+
+    days_until = (bd - today).days
+    await update.message.reply_text(
+        f"Знайдено: {m['name']}, ДН {bd}, через {days_until} дн.\nЗапускаю..."
+    )
+
+    # Створюємо подію
+    event_id = await _ensure_event_exists(context, m, bd)
+
+    # Надсилаємо в групу
+    active = await get_active_group_members(context.bot)
+    count = len([x for x in active if x["id"] != m["id"]])
+    amount = round(BIRTHDAY_FUND_AMOUNT / count) if count else BIRTHDAY_FUND_AMOUNT
+
+    if days_until == 0:
+        text = text_group_birthday(m["name"], bd, m["id"])
+        await send_to_group(context, text, congrats=True)
+    elif days_until == 1:
+        paid = count_paid(event_id)
+        total = count
+        text = text_group_day_before(m["name"], bd, paid, total)
+        await send_to_group(context, text)
+    else:
+        text = text_group_announce(m["name"], bd, count, amount, member_id=m["id"])
+        await send_to_group(context, text)
+
+    await update.message.reply_text("Готово! Перевір групу.")
+
+
 async def cmd_clear_log(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """/clearlog — очистити журнал нагадувань (щоб testcheck спрацював знову)."""
     if update.effective_user.id not in ADMIN_IDS:
@@ -1659,6 +1719,7 @@ def main():
     app.add_handler(CommandHandler("remind",      cmd_remind))
     app.add_handler(CommandHandler("testcheck",   cmd_test_check))
     app.add_handler(CommandHandler("clearlog",    cmd_clear_log))
+    app.add_handler(CommandHandler("forcebday",   cmd_force_bday))
     app.add_handler(CallbackQueryHandler(callback_paid, pattern=r"^paid_\d+$"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
