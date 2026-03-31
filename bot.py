@@ -158,6 +158,35 @@ def get_active_members() -> list:
     conn.close()
     return [dict(r) for r in rows]
 
+async def is_member_in_group(bot, telegram_id: int) -> bool:
+    """Перевіряє чи є учасниця зараз в групі."""
+    if not GROUP_CHAT_ID or not telegram_id:
+        return True  # якщо немає ID групи — не блокуємо
+    try:
+        member = await bot.get_chat_member(chat_id=GROUP_CHAT_ID, user_id=telegram_id)
+        return member.status in ("member", "administrator", "creator")
+    except Exception:
+        return False  # якщо помилка — вважаємо що не в групі
+
+async def get_active_group_members(bot) -> list:
+    """Повертає тільки тих учасниць, які зараз є в групі."""
+    all_active = get_active_members()
+    result = []
+    for m in all_active:
+        if not m["telegram_id"]:
+            continue  # без telegram_id — пропускаємо
+        in_group = await is_member_in_group(bot, m["telegram_id"])
+        if in_group:
+            result.append(m)
+        else:
+            logger.info(f"⚠️ {m['name']} більше не в групі — пропускаємо")
+            # Автоматично деактивуємо
+            conn = get_conn()
+            conn.execute("UPDATE members SET is_active=0 WHERE id=?", (m["id"],))
+            conn.commit()
+            conn.close()
+    return result
+
 def get_latest_event() -> Optional[dict]:
     conn = get_conn()
     row = conn.execute(
@@ -374,10 +403,18 @@ async def daily_birthday_check(context: ContextTypes.DEFAULT_TYPE):
 
 async def _do_announce(context, member: dict, bd_date: date):
     """За 3 дні: анонс у групу + особисті повідомлення."""
-    active = get_active_members()
+    # Перевіряємо хто зараз в групі
+    active = await get_active_group_members(context.bot)
+
+    # Якщо іменинниця вже не в групі — не збираємо їй на ДН
+    birthday_still_in_group = any(m["id"] == member["id"] for m in active)
+    if not birthday_still_in_group:
+        logger.info(f"⚠️ {member['name']} більше не в групі — збір скасовано")
+        return
+
     count  = len(active) - 1  # іменинниця не платить
     if count <= 0:
-        count = len(active)   # якщо вона єдина — все одно показуємо
+        count = len(active)
     amount = round(BIRTHDAY_FUND_AMOUNT / count)
 
     # Створюємо подію
