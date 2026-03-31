@@ -118,7 +118,7 @@ def parse_extra_info(text: str) -> dict:
 
 
 # ─── БД ─────────────────────────────────────────────────────────────────────
-DB_PATH = "birthday_fund.db"
+DB_PATH = "/data/birthday_fund.db"
 
 def get_conn():
     conn = sqlite3.connect(DB_PATH)
