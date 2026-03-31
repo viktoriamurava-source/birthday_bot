@@ -463,10 +463,10 @@ async def send_to_group(context: ContextTypes.DEFAULT_TYPE, text: str,
     # Визначаємо куди писати
     write_thread = GROUP_THREAD_ID  # гілка спілкування
 
-    kwargs = {"chat_id": GROUP_CHAT_ID, "text": text, "parse_mode": "HTML"}
+    kwargs = {"chat_id": GROUP_CHAT_ID, "text": text}
     if write_thread:
         kwargs["message_thread_id"] = write_thread
-    logger.info(f"📤 Надсилаю в групу: chat_id={GROUPCHAT_ID}, thread={writethread}")
+    logger.info(f"📤 Надсилаю в групу: chat_id={GROUP_CHAT_ID}, thread={write_thread}")
     try:
         await context.bot.send_message(**kwargs)
         logger.info("✅ Надіслано успішно")
@@ -483,7 +483,7 @@ async def send_to_group(context: ContextTypes.DEFAULT_TYPE, text: str,
 
     # В день ДН — додатково пишемо в гілку привітань (якщо окрема)
     if congrats and CONGRATS_THREAD_ID and CONGRATS_THREAD_ID != write_thread:
-        kwargs2 = {"chat_id": GROUP_CHAT_ID, "text": text, "parse_mode": "HTML",
+        kwargs2 = {"chat_id": GROUP_CHAT_ID, "text": text,
                    "message_thread_id": CONGRATS_THREAD_ID}
         try:
             await context.bot.send_message(**kwargs2)
