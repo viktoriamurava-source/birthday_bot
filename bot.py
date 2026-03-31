@@ -397,8 +397,7 @@ def text_group_day_before(name: str, bd_date: date,
     return (
         f"⏰ Нагадування — завтра день народження!\n\n"
         f"🌸 {name} ({bd_date.strftime('%d.%m')})\n\n"
-        f"📊 Вже здали: {paid} із {total} ({percent}%)\n"
-        f"❌ Ще не здали: {remaining}\n\n"
+        f"📊 Вже здали: {percent}%\n\n"
         f"Дівчата, хто ще не встиг — перевірте особисті повідомлення 💳"
     )
 
@@ -578,7 +577,7 @@ async def _do_announce(context, member: dict, bd_date: date):
             await context.bot.send_message(
                 chat_id=m["telegram_id"],
                 text=text_personal_announce(member["name"], amount, member_id=member.get("id")),
-                parse_mode="HTML",
+                
                 reply_markup=keyboard
             )
             sent += 1
@@ -629,7 +628,7 @@ async def _do_day_before(context, member: dict, bd_date: date):
             await context.bot.send_message(
                 chat_id=u["telegram_id"],
                 text=text_personal_reminder(member["name"], bd_date, amount),
-                parse_mode="HTML",
+                
                 reply_markup=keyboard
             )
             sent += 1
@@ -648,7 +647,6 @@ async def _do_day_before(context, member: dict, bd_date: date):
                     f"❌ Не оплатили ({len(unpaid)}/{total}):\n{names_list}\n\n"
                     f"Нагадати вручну: /remind"
                 ),
-                parse_mode="HTML"
             )
         except Exception:
             pass
@@ -916,7 +914,7 @@ async def _ensure_event_exists(context, member: dict, bd_date: date):
             await context.bot.send_message(
                 chat_id=m["telegram_id"],
                 text=text_personal_announce(member["name"], amount, member_id=member.get("id")),
-                parse_mode="HTML",
+                
                 reply_markup=keyboard
             )
             sent += 1
@@ -1010,7 +1008,7 @@ async def cmd_my_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🎨 Улюблений колір: {row['favorite_color'] or 'не вказано'}",
         f"\nЩоб оновити — напиши /editinfo",
     ]
-    await update.message.reply_text("\n".join(lines), parse_mode="HTML")
+    await update.message.reply_text("\n".join(lines))
 
 
 async def cmd_edit_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1105,7 +1103,7 @@ async def _launch_manual_event(update, context, person_name: str):
             await context.bot.send_message(
                 chat_id=m["telegram_id"],
                 text=text_personal_announce(person_name, amount),
-                parse_mode="HTML",
+                
                 reply_markup=keyboard
             )
             sent += 1
@@ -1142,8 +1140,8 @@ async def cmd_event_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     percent     = round(len(paid_rows) / total * 100) if total else 0
 
     lines = [
-        f"📊 ДН {event['birthday_personname']} | {event['event_date']}",
-        f"💰 {event['amount_perperson']:.0f} грн × {total} = {BIRTHDAY_FUND_AMOUNT} грн",
+        f"📊 ДН {event['birthday_person_name']} | {event['event_date']}",
+        f"💰 {event['amount_per_person']:.0f} грн × {total} = {BIRTHDAY_FUND_AMOUNT} грн",
         f"💵 Зібрано: {collected:.0f} / {BIRTHDAY_FUND_AMOUNT} грн ({percent}%)\n",
         f"✅ Оплатили ({len(paid_rows)}):",
     ]
@@ -1153,7 +1151,7 @@ async def cmd_event_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for r in unpaid_rows:
         lines.append(f"  • {r['name']}")
 
-    await update.message.reply_text("\n".join(lines), parse_mode="HTML")
+    await update.message.reply_text("\n".join(lines))
 
 
 async def cmd_remind(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1188,7 +1186,7 @@ async def cmd_remind(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await context.bot.send_message(
                 chat_id=u["telegram_id"],
                 text=text_remind_manual(event["birthday_person_name"], bd_date, amount),
-                parse_mode="HTML",
+                
                 reply_markup=keyboard
             )
             sent += 1
@@ -1472,7 +1470,6 @@ async def callback_paid(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 admin_id,
                 f"💰 {query.from_user.fullname} відмітила оплату\n"
                 f"🎂 ДН {bd_name}",
-                parse_mode="HTML"
             )
         except Exception:
             pass
@@ -1634,7 +1631,7 @@ async def cmd_activate(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if GROUP_CHAT_ID:
         kwargs = {"chat_id": GROUP_CHAT_ID, "text": text,
-                  "parse_mode": "HTML", "reply_markup": keyboard}
+                   "reply_markup": keyboard}
         if GROUP_THREAD_ID:
             kwargs["message_thread_id"] = GROUP_THREAD_ID
         try:
@@ -1676,7 +1673,7 @@ async def weekly_activation_reminder(context: ContextTypes.DEFAULT_TYPE):
     ]])
 
     kwargs = {"chat_id": GROUP_CHAT_ID, "text": text,
-              "parse_mode": "HTML", "reply_markup": keyboard}
+               "reply_markup": keyboard}
     if GROUP_THREAD_ID:
         kwargs["message_thread_id"] = GROUP_THREAD_ID
     try:
