@@ -1382,6 +1382,21 @@ async def cmd_force_bday(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"Особистих надіслано: {sent}")
 
 
+async def cmd_test_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id not in ADMIN_IDS:
+        return
+    await update.message.reply_text(f"Надсилаю... chat={GROUP_CHAT_ID} thread={GROUP_THREAD_ID}")
+    try:
+        await context.bot.send_message(
+            chat_id=GROUP_CHAT_ID,
+            text="Тест повідомлення від бота",
+            message_thread_id=GROUP_THREAD_ID
+        )
+        await update.message.reply_text("Успішно!")
+    except Exception as e:
+        await update.message.reply_text(f"Помилка: {e}")
+
+
 async def cmd_clear_log(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """/clearlog — очистити журнал нагадувань (щоб testcheck спрацював знову)."""
     if update.effective_user.id not in ADMIN_IDS:
@@ -1775,6 +1790,7 @@ def main():
     app.add_handler(CommandHandler("remind",      cmd_remind))
     app.add_handler(CommandHandler("testcheck",   cmd_test_check))
     app.add_handler(CommandHandler("clearlog",    cmd_clear_log))
+    app.add_handler(CommandHandler("testgroup",   cmd_test_group))
     app.add_handler(CommandHandler("forcebday",   cmd_force_bday))
     app.add_handler(CallbackQueryHandler(callback_paid, pattern=r"^paid_\d+$"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
