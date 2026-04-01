@@ -34,7 +34,7 @@ BIRTHDAY_FUND_AMOUNT = int(os.getenv("BIRTHDAY_FUND_AMOUNT", "4000"))
 JAR_LINK             = os.getenv("JAR_LINK", "https://send.monobank.ua/YOUR_LINK")
 GROUP_CHAT_ID        = int(os.getenv("GROUP_CHAT_ID", "0"))
 BIRTHDAY_THREAD_ID   = int(os.getenv("BIRTHDAY_THREAD_ID", "0")) or None
-CHECK_HOUR_UTC       = int(os.getenv("CHECK_HOUR_UTC", "7"))   # 09:00 Київ
+CHECK_HOUR_UTC       = int(os.getenv("CHECK_HOUR_UTC", "18"))  # 20:00 Київ
 
 # Гілка куди бот ПИШЕ всі повідомлення (спілкування)
 GROUP_THREAD_ID  = int(os.getenv("GROUP_THREAD_ID", "0")) or None
