@@ -30,7 +30,8 @@ from telegram.ext import (
 # ─── Конфігурація ───────────────────────────────────────────────────────────
 BOT_TOKEN            = os.getenv("BOT_TOKEN", "ВСТАВТЕ_ТОКЕН")
 ADMIN_IDS            = [int(x) for x in os.getenv("ADMIN_IDS", "123456789").split(",")]
-BIRTHDAY_FUND_AMOUNT = int(os.getenv("BIRTHDAY_FUND_AMOUNT", "4000"))
+BIRTHDAY_FUND_AMOUNT = int(os.getenv("BIRTHDAY_FUND_AMOUNT", "4000"))  # загальна сума
+AMOUNT_PER_PERSON    = int(os.getenv("AMOUNT_PER_PERSON", "0"))  # фіксована сума з кожної (якщо 0 — ділимо загальну)
 JAR_LINK             = os.getenv("JAR_LINK", "https://send.monobank.ua/YOUR_LINK")
 GROUP_CHAT_ID        = int(os.getenv("GROUP_CHAT_ID", "0"))
 BIRTHDAY_THREAD_ID   = int(os.getenv("BIRTHDAY_THREAD_ID", "0")) or None
@@ -948,7 +949,7 @@ async def _ensure_event_exists(context, member: dict, bd_date: date):
     # Іменинниця не платить
     payers = [m for m in active if m["id"] != member["id"]]
     count  = len(payers) if payers else len(active)
-    amount = round(BIRTHDAY_FUND_AMOUNT / count) if count else BIRTHDAY_FUND_AMOUNT
+    amount = AMOUNT_PER_PERSON if AMOUNT_PER_PERSON > 0 else (round(BIRTHDAY_FUND_AMOUNT / count) if count else BIRTHDAY_FUND_AMOUNT)
 
     event_id = create_event(member, bd_date, amount, count, active)
     logger.info(f"✅ Створено термінову подію для {member['name']}: event_id={eventid}")
@@ -1327,7 +1328,7 @@ async def cmd_birthdays(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     lines = ["🎂 Дні народження учасниць:\n"]
     for mo in sorted(by_month.keys()):
-        lines.append(f"📅 {MONTH_NAMESUA[mo]}:")
+        lines.append(f"📅 {MONTH_NAMES_UA[mo]}:")
         for d, name in sorted(by_month[mo]):
             try:
                 bd = date(today.year, mo, d)
@@ -1423,7 +1424,7 @@ async def cmd_force_bday(update: Update, context: ContextTypes.DEFAULT_TYPE):
     active = get_active_members()
     payers = [x for x in active if x["id"] != m["id"]]
     count  = len(payers) if payers else len(active)
-    amount = round(BIRTHDAY_FUND_AMOUNT / count) if count else BIRTHDAY_FUND_AMOUNT
+    amount = AMOUNT_PER_PERSON if AMOUNT_PER_PERSON > 0 else (round(BIRTHDAY_FUND_AMOUNT / count) if count else BIRTHDAY_FUND_AMOUNT)
 
     # Надсилаємо в групу
     await update.message.reply_text(f"Надсилаю в групу...")
