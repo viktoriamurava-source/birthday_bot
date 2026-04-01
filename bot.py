@@ -593,7 +593,7 @@ async def _do_announce(context, member: dict, bd_date: date):
 
     # Особисто кожній (крім іменинниці)
     keyboard = InlineKeyboardMarkup([[
-        InlineKeyboardButton("✅ Я оплатила!", callback_data=f"paid{event_id}")
+        InlineKeyboardButton("✅ Я оплатила!", callback_data=f"paid_{event_id}")
     ]])
     sent, failed = 0, 0
     for m in active:
@@ -647,7 +647,7 @@ async def _do_day_before(context, member: dict, bd_date: date):
         return
 
     keyboard = InlineKeyboardMarkup([[
-        InlineKeyboardButton("✅ Я оплатила!", callback_data=f"paid{event_id}")
+        InlineKeyboardButton("✅ Я оплатила!", callback_data=f"paid_{event_id}")
     ]])
     sent = 0
     for u in unpaid:
@@ -934,7 +934,7 @@ async def _ensure_event_exists(context, member: dict, bd_date: date):
 
     # Надсилаємо особисті повідомлення
     keyboard = InlineKeyboardMarkup([[
-        InlineKeyboardButton("✅ Я оплатила!", callback_data=f"paid{event_id}")
+        InlineKeyboardButton("✅ Я оплатила!", callback_data=f"paid_{event_id}")
     ]])
     sent = 0
     for m in payers:
@@ -1125,7 +1125,7 @@ async def _launch_manual_event(update, context, person_name: str):
 
     # Особисто всім (крім іменинниці)
     keyboard = InlineKeyboardMarkup([[
-        InlineKeyboardButton("✅ Я оплатила!", callback_data=f"paid{event_id}")
+        InlineKeyboardButton("✅ Я оплатила!", callback_data=f"paid_{event_id}")
     ]])
     sent, failed = 0, 0
     for m in payers:
@@ -1207,7 +1207,7 @@ async def cmd_remind(update: Update, context: ContextTypes.DEFAULT_TYPE):
     paid    = count_paid(event["id"])
 
     keyboard = InlineKeyboardMarkup([[
-        InlineKeyboardButton("✅ Я оплатила!", callback_data=f"paid{event['id']}")
+        InlineKeyboardButton("✅ Я оплатила!", callback_data=f"paid_{event['id']}")
     ]])
 
     # Особисті нагадування
