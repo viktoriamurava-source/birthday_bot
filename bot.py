@@ -401,13 +401,34 @@ def text_personal_announce(birthday_name: str, amount: int,
     )
 
 def text_group_day_before(name: str, bd_date: date,
-                          paid: int, total: int) -> str:
-    """За 1 день — нагадування в групу з відсотком оплат."""
+                          paid: int, total: int,
+                          member_id: int = None) -> str:
+    """Нагадування в групу з відсотком оплат."""
+    from datetime import date as _date
+    today = _date.today()
+    days_left = (bd_date - today).days
+
+    if days_left == 0:
+        timing = "сьогодні день народження!"
+        emoji = "🎂"
+    elif days_left == 1:
+        timing = "завтра день народження!"
+        emoji = "⏰"
+    elif days_left <= 3:
+        timing = f"через {days_left} дні день народження!"
+        emoji = "🛎️"
+    else:
+        timing = f"через {days_left} днів день народження!"
+        emoji = "🛎️"
+
     percent = round(paid / total * 100) if total else 0
-    remaining = total - paid
+
+    uname = get_member_username(member_id) if member_id else None
+    mention = f" ({uname})" if uname else ""
+
     return (
-        f"⏰ Нагадування — завтра день народження!\n\n"
-        f"🌸 {name}\n\n"
+        f"{emoji} Нагадування — {timing}\n\n"
+        f"🌸 {name}{mention}\n\n"
         f"📊 Вже здали: {percent}%\n\n"
         f"Дівчата, хто ще не встиг — перевірте особисті повідомлення 💳"
     )
@@ -1227,8 +1248,18 @@ async def cmd_remind(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
 
     # В групу — поточний відсоток
+    member_id = None
+    conn_tmp = get_conn()
+    row_tmp = conn_tmp.execute(
+        "SELECT id FROM members WHERE name=?", (event["birthday_person_name"],)
+    ).fetchone()
+    conn_tmp.close()
+    if row_tmp:
+        member_id = row_tmp["id"]
+
     await send_to_group(context, text_group_day_before(
-        event["birthday_person_name"], bd_date, paid, event["total_members"]
+        event["birthday_person_name"], bd_date, paid, event["total_members"],
+        member_id=member_id
     ))
 
     # Список боржниць адміну
