@@ -196,6 +196,7 @@ def init_db():
         ("instagram",      "TEXT"),
         ("favorite_color", "TEXT"),
         ("birth_year",     "INTEGER"),
+        ("username",       "TEXT"),
     ]:
         try:
             conn.execute(f"ALTER TABLE members ADD COLUMN {col} {definition}")
@@ -333,6 +334,13 @@ def get_member_info(member_id: int) -> dict:
     conn.close()
     return dict(row) if row else {}
 
+def instagram_link(insta: str) -> str:
+    """Перетворює @нік на клікабельне посилання Instagram."""
+    if not insta:
+        return ""
+    nick = insta.lstrip("@").rstrip("/")
+    return f"https://www.instagram.com/{nick}/"
+
 def text_group_announce(name: str, bd_date: date, count: int, amount: int,
                         member_id: int = None) -> str:
     """За 3 дні — анонс у групу."""
@@ -347,14 +355,14 @@ def text_group_announce(name: str, bd_date: date, count: int, amount: int,
         if info.get("nova_poshta"):
             parts.append(f"📦 {info['nova_poshta']}")
         if info.get("instagram"):
-            parts.append(f"📸 {info['instagram']}")
+            parts.append(f"📸 {instagram_link(info['instagram'])}")
         if info.get("favorite_color"):
             parts.append(f"🎨 Улюблений колір: {info['favorite_color']}")
         if parts:
             extra_lines = "\n\n" + "\n".join(parts)
 
     return (
-        f"🎀 Дівчата, у нас скоро іменинниця!\n\n"
+        f"🛎️ Дівчата, у нас скоро іменинниця!\n\n"
         f"🌸 {name} святкує день народження {d} {MONTH_GENITIVE_UA[mo]}!"
         f"{extra_lines}\n\n"
         f"💰 Збираємо {BIRTHDAY_FUND_AMOUNT} грн\n"
@@ -366,6 +374,9 @@ def text_group_announce(name: str, bd_date: date, count: int, amount: int,
 def text_personal_announce(birthday_name: str, amount: int,
                            member_id: int = None) -> str:
     """За 3 дні — особисте повідомлення кожній учасниці."""
+    uname = get_member_username(member_id) if member_id else None
+    mention = f" ({uname})" if uname else ""
+
     extra_lines = ""
     if member_id:
         info = get_member_info(member_id)
@@ -373,20 +384,20 @@ def text_personal_announce(birthday_name: str, amount: int,
         if info.get("nova_poshta"):
             parts.append(f"📦 Нова пошта: {info['nova_poshta']}")
         if info.get("instagram"):
-            parts.append(f"📸 Instagram: {info['instagram']}")
+            link = instagram_link(info["instagram"])
+            parts.append(f"📸 Instagram: {link}")
         if info.get("favorite_color"):
             parts.append(f"🎨 Улюблений колір: {info['favorite_color']}")
         if parts:
-            extra_lines = "\n\n_Корисна інфо про іменинницю:_\n" + "\n".join(parts)
+            extra_lines = "\n\nКорисна інфо про іменинницю:\n" + "\n".join(parts)
 
     return (
-        f"🎀 У нашій спільноті скоро іменинниця!\n\n"
-        f"🌸 {birthday_name} святкує день народження"
+        f"🛎️ У нашій спільноті скоро іменинниця!\n\n"
+        f"🌸 {birthday_name}{mention} святкує день народження"
         f"{extra_lines}\n\n"
         f"💰 Твоя частина: {amount} грн\n\n"
         f"💳 Переказати на банку:\n{JAR_LINK}\n\n"
-        f"_Після переказу натисни кнопку нижче — "
-        f"так ми бачимо загальну картину збору_ 🙏"
+        f"Після переказу натисни кнопку нижче — так ми бачимо загальну картину збору 🙏"
     )
 
 def text_group_day_before(name: str, bd_date: date,
@@ -396,7 +407,7 @@ def text_group_day_before(name: str, bd_date: date,
     remaining = total - paid
     return (
         f"⏰ Нагадування — завтра день народження!\n\n"
-        f"🌸 {name} ({bd_date.strftime('%d.%m')})\n\n"
+        f"🌸 {name}\n\n"
         f"📊 Вже здали: {percent}%\n\n"
         f"Дівчата, хто ще не встиг — перевірте особисті повідомлення 💳"
     )
@@ -404,7 +415,7 @@ def text_group_day_before(name: str, bd_date: date,
 def text_personal_reminder(birthday_name: str, bd_date: date, amount: int) -> str:
     """За 1 день — нагадування боржниці в особисті."""
     return (
-        f"👋 Нагадуємо!\n\n"
+        f"👋 Нагадую!\n\n"
         f"Твій внесок на день народження {birthday_name} "
         f"({bd_date.strftime('%d.%m')}) ще не зафіксовано.\n\n"
         f"⚠️ Завтра вже день народження — встигни сьогодні!\n\n"
@@ -422,15 +433,33 @@ def get_member_age(member_id: int, bd_date: date) -> Optional[int]:
         return bd_date.year - row["birth_year"]
     return None
 
+def get_member_username(member_id: int) -> Optional[str]:
+    """Повертає Telegram username або telegram_id для mention."""
+    conn = get_conn()
+    row = conn.execute("SELECT telegram_id, username FROM members WHERE id=?", (member_id,)).fetchone()
+    conn.close()
+    if not row:
+        return None
+    if row["username"]:
+        return row["username"]  # @username
+    return None
+
 def text_group_birthday(name: str, bd_date: date, member_id: int = None) -> str:
     """В день ДН — святкове повідомлення в групу (без грошей)."""
     mo  = bd_date.month
     d   = bd_date.day
     age = get_member_age(member_id, bd_date) if member_id else None
     age_str = f"\n🎈 Виповнюється {age} років!" if age else ""
+
+    # Додаємо @username якщо є
+    mention = ""
+    if member_id:
+        uname = get_member_username(member_id)
+        if uname:
+            mention = f" ({uname})"
+
     return (
-        f"🎂 Сьогодні день народження!\n\n"
-        f"🌸 Наша улюблена {name} святкує {d} {MONTH_GENITIVE_UA[mo]}!{age_str}\n\n"
+        f"🎂 Сьогодні день народження нашої {name}{mention}!{age_str}\n\n"
         f"Дівчата, давайте всі разом привітаємо іменинницю! 🥳🎉\n\n"
         f"З днем народження, {name}! 💐"
     )
@@ -679,8 +708,9 @@ async def handle_new_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
         bot_username = bot_info.username
 
         # Повідомлення в групу
+        uname_str = f" (@{user.username})" if user.username else ""
         welcome_text = (
-            f"Вітаємо нову учасницю {user.first_name}! 🎉\n\n"
+            f"Вітаємо нову учасницю {user.first_name}{uname_str}! 🎉\n\n"
             f"У нас є бот для збору на дні народження — "
             f"він автоматично нагадує і відстежує хто здав.\n\n"
             f"Активуй його щоб отримувати сповіщення 👇"
@@ -931,8 +961,11 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "SELECT id, birthday, nova_poshta, instagram, favorite_color FROM members WHERE telegram_id=?",
         (user.id,)
     ).fetchone()
+    uname = f"@{user.username}" if user.username else None
     conn.execute("INSERT OR IGNORE INTO members (telegram_id, name) VALUES (?,?)",
                  (user.id, user.full_name))
+    if uname:
+        conn.execute("UPDATE members SET username=? WHERE telegram_id=?", (uname, user.id))
     conn.commit()
     conn.close()
 
@@ -1333,6 +1366,22 @@ async def cmd_force_bday(update: Update, context: ContextTypes.DEFAULT_TYPE):
         bd = date(today.year + 1, month, day)
 
     days_until = (bd - today).days
+
+    # Перевірка дублювання
+    conn3 = get_conn()
+    already = conn3.execute(
+        "SELECT id FROM reminder_log WHERE member_id=? AND year=? AND log_type='force'",
+        (m["id"], today.year)
+    ).fetchone()
+    conn3.close()
+
+    if already:
+        await update.message.reply_text(
+            f"Повідомлення для {m['name']} вже надсилалось.\n"
+            f"Щоб надіслати ще раз — спочатку /clearlog"
+        )
+        return
+
     await update.message.reply_text(
         f"Знайдено: {m['name']}, ДН {bd}, через {days_until} дн.\nЗапускаю..."
     )
@@ -1356,6 +1405,15 @@ async def cmd_force_bday(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await send_to_group(context, text)
 
     await update.message.reply_text("Готово! Перевір групу.")
+
+    # Записуємо що надсилали — захист від дублювання
+    conn_log = get_conn()
+    conn_log.execute(
+        "INSERT OR IGNORE INTO reminder_log (member_id, days_before, year, log_type) VALUES (?,?,?,?)",
+        (m["id"], days_until, today.year, "force")
+    )
+    conn_log.commit()
+    conn_log.close()
 
     # Створюємо подію і надсилаємо особисті
     event_id = get_event_for_member_date(m["id"], bd)
@@ -1459,8 +1517,7 @@ async def callback_paid(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     bd_name = ev["birthday_person_name"] if ev else ""
     await query.edit_message_text(
-        f"✅ Дякуємо! Оплату зафіксовано 💕\n\n"
-        f"🎂 ДН {bd_name}"
+        f"✅ Дякуємо за внесок в комуну! Оплату на ДН {bd_name} зафіксовано 💕"
     )
 
     # Повідомлення адміну
