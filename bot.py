@@ -985,6 +985,8 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uname = f"@{user.username}" if user.username else None
     conn.execute("INSERT OR IGNORE INTO members (telegram_id, name) VALUES (?,?)",
                  (user.id, user.full_name))
+    # Оновлюємо ім'я і username при кожному /start
+    conn.execute("UPDATE members SET name=? WHERE telegram_id=?", (user.full_name, user.id))
     if uname:
         conn.execute("UPDATE members SET username=? WHERE telegram_id=?", (uname, user.id))
     conn.commit()
@@ -1484,6 +1486,27 @@ async def cmd_test_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"Помилка: {e}")
 
 
+async def cmd_set_username(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/setusername Ім'я @нік — вручну встановити username для учасниці."""
+    if update.effective_user.id not in ADMIN_IDS:
+        return
+    if len(context.args) < 2:
+        await update.message.reply_text("Формат: /setusername Ім'я @нік\nНаприклад: /setusername Вікторія @vmuravska")
+        return
+    name = context.args[0]
+    uname = context.args[1] if context.args[1].startswith("@") else "@" + context.args[1]
+    conn = get_conn()
+    existing = conn.execute("SELECT id FROM members WHERE LOWER(name) LIKE LOWER(?)", (f"%{name}%",)).fetchone()
+    if not existing:
+        await update.message.reply_text(f"❌ Не знайдено: {name}")
+        conn.close()
+        return
+    conn.execute("UPDATE members SET username=? WHERE id=?", (uname, existing["id"]))
+    conn.commit()
+    conn.close()
+    await update.message.reply_text(f"✅ Username для {name} встановлено: {uname}")
+
+
 async def cmd_clear_log(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """/clearlog — очистити журнал нагадувань (щоб testcheck спрацював знову)."""
     if update.effective_user.id not in ADMIN_IDS:
@@ -1875,6 +1898,7 @@ def main():
     app.add_handler(CommandHandler("remind",      cmd_remind))
     app.add_handler(CommandHandler("testcheck",   cmd_test_check))
     app.add_handler(CommandHandler("clearlog",    cmd_clear_log))
+    app.add_handler(CommandHandler("setusername",  cmd_set_username))
     app.add_handler(CommandHandler("testgroup",   cmd_test_group))
     app.add_handler(CommandHandler("forcebday",   cmd_force_bday))
     app.add_handler(CallbackQueryHandler(callback_paid, pattern=r"^paid_\d+$"))
