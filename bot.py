@@ -991,6 +991,25 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if uname:
         conn.execute("UPDATE members SET username=? WHERE telegram_id=?", (uname, user.id))
     conn.commit()
+
+    # Додаємо нову учасницю до всіх активних подій
+    member_row = conn.execute(
+        "SELECT id FROM members WHERE telegram_id=?", (user.id,)
+    ).fetchone()
+    if member_row:
+        # Знаходимо активні події (за останні 14 днів)
+        from datetime import timedelta
+        cutoff = (date.today() - timedelta(days=14)).isoformat()
+        active_events = conn.execute(
+            "SELECT id, amount_per_person FROM birthday_events WHERE event_date >= ?",
+            (cutoff,)
+        ).fetchall()
+        for ev in active_events:
+            conn.execute(
+                "INSERT OR IGNORE INTO payments (event_id, member_id, amount) VALUES (?,?,?)",
+                (ev["id"], member_row["id"], ev["amount_per_person"])
+            )
+    conn.commit()
     conn.close()
 
     await _check_urgent_birthdays(context)
