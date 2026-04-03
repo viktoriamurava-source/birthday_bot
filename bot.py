@@ -1130,7 +1130,7 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for r in rows:
         icon = "✅" if r["paid"] else "❌"
         lines.append(
-            f"{icon} ДН {r['birthday_personname']} "
+            f"{icon} ДН {r['birthday_person_name']} "
             f"({r['event_date']}) — {r['amount']:.0f} грн"
         )
     await update.message.reply_text("\n".join(lines))
