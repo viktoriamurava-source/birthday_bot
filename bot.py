@@ -375,6 +375,18 @@ def menu_btn() -> InlineKeyboardButton:
 
 # ─── Головне меню ─────────────────────────────────────────────────────────────
 
+async def cmd_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/menu — показати головне меню новим повідомленням."""
+    if update.effective_chat and update.effective_chat.type != "private":
+        return
+    user_id = update.effective_user.id
+    member = get_member(user_id)
+    if member and has_active_subscription(member):
+        await show_main_menu(update, context, member)
+    else:
+        await cmd_start(update, context)
+
+
 async def show_main_menu(update_or_query, context, member: dict):
     sub_until = member.get("subscription_until")
     if sub_until:
@@ -395,17 +407,45 @@ async def show_main_menu(update_or_query, context, member: dict):
          InlineKeyboardButton("Події", callback_data="events")],
         [InlineKeyboardButton("Моя підписка", callback_data="subscription"),
          InlineKeyboardButton("Мої оплати ДН", callback_data="bday_status")],
+        [InlineKeyboardButton("Instagram комуни", url=INSTAGRAM_COMMUNITY),
+         InlineKeyboardButton("Instagram засновниці", url=INSTAGRAM_FOUNDER)],
     ])
 
+    # Постійна кнопка внизу екрану
+    persistent = ReplyKeyboardMarkup(
+        [["Головне меню"]],
+        resize_keyboard=True,
+        is_persistent=True
+    )
+
     if hasattr(update_or_query, "edit_message_text"):
-        await update_or_query.edit_message_text(text, reply_markup=keyboard)
+        try:
+            await update_or_query.edit_message_text(text, reply_markup=keyboard)
+            # Надсилаємо окреме повідомлення щоб показати persistent keyboard
+            try:
+                await update_or_query.message.reply_text(
+                    "Натисни кнопку нижче щоб відкрити меню в будь-який момент",
+                    reply_markup=persistent
+                )
+            except Exception:
+                pass
+        except Exception:
+            await update_or_query.message.reply_text(text, reply_markup=keyboard)
     else:
         msg = update_or_query.message or update_or_query.channel_post
         await msg.reply_text(text, reply_markup=keyboard)
+        await msg.reply_text(
+            "Натисни кнопку нижче щоб відкрити меню в будь-який момент",
+            reply_markup=persistent
+        )
 
 # ─── /start ───────────────────────────────────────────────────────────────────
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Ігноруємо /start з групи — тільки особисті повідомлення
+    if update.effective_chat and update.effective_chat.type != "private":
+        return
+
     user = update.effective_user
     uname = user.username
 
@@ -471,9 +511,11 @@ async def show_welcome_new(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Instagram засновниці: {INSTAGRAM_FOUNDER}\n\n"
         "Щоб долучитись — оформи підписку:"
     )
-    keyboard = InlineKeyboardMarkup([[
-        InlineKeyboardButton("Підписатись", callback_data="subscribe")
-    ]])
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("Instagram комуни", url=INSTAGRAM_COMMUNITY),
+         InlineKeyboardButton("Instagram засновниці", url=INSTAGRAM_FOUNDER)],
+        [InlineKeyboardButton("Підписатись", callback_data="subscribe")],
+    ])
     await update.message.reply_text(text, reply_markup=keyboard)
 
 # ─── Онбординг ────────────────────────────────────────────────────────────────
@@ -1085,6 +1127,15 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Онбординг
     if context.user_data.get("onboarding_step"):
         await handle_onboarding_step(update, context, context.user_data["onboarding_step"], text)
+        return
+
+    # Постійна кнопка "Головне меню"
+    if text == "Головне меню":
+        member = get_member(user_id)
+        if member and has_active_subscription(member):
+            await show_main_menu(update, context, member)
+        else:
+            await cmd_start(update, context)
         return
 
     # Очікування вводу
@@ -2203,6 +2254,7 @@ def main():
 
     # Команди
     app.add_handler(CommandHandler("start",        cmd_start))
+    app.add_handler(CommandHandler("menu",         cmd_menu))
     app.add_handler(CommandHandler("admin",        cmd_admin))
     app.add_handler(CommandHandler("members",      cmd_members))
     app.add_handler(CommandHandler("birthdays",    cmd_birthdays))
