@@ -409,7 +409,27 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     uname = user.username
 
-    upsert_member(user.id, user.full_name, uname)
+    # Перевіряємо чи є вже запис за username (доданий адміном без telegram_id)
+    conn_check = get_conn()
+    pre_created = None
+    if uname:
+        pre_created = conn_check.execute(
+            "SELECT id FROM members WHERE LOWER(username)=LOWER(?) AND telegram_id IS NULL",
+            (f"@{uname}",)
+        ).fetchone()
+    conn_check.close()
+
+    if pre_created:
+        # Прив'язуємо telegram_id до вже існуючого запису
+        conn_link = get_conn()
+        conn_link.execute(
+            "UPDATE members SET telegram_id=?, name=? WHERE id=?",
+            (user.id, user.full_name, pre_created["id"])
+        )
+        conn_link.commit()
+        conn_link.close()
+    else:
+        upsert_member(user.id, user.full_name, uname)
     member = get_member(user.id)
 
     # Додаємо до активних подій ДН якщо нова
@@ -1192,12 +1212,22 @@ async def cmd_set_sub(update: Update, context: ContextTypes.DEFAULT_TYPE):
         UPDATE members SET subscription_until=? WHERE
         LOWER(username)=LOWER(?) OR LOWER(username)=LOWER(?) OR LOWER(name) LIKE LOWER(?)
     """, (until_str, f"@{identifier}", identifier, f"%{identifier}%"))
-    conn.commit()
-    conn.close()
     if result.rowcount:
+        conn.commit()
+        conn.close()
         await update.message.reply_text(f"Підписку до {until_str} встановлено")
     else:
-        await update.message.reply_text("Учасницю не знайдено")
+        # Створюємо нову учасницю
+        conn.execute(
+            "INSERT INTO members (name, username, subscription_until) VALUES (?,?,?)",
+            (identifier, f"@{identifier}", until_str)
+        )
+        conn.commit()
+        conn.close()
+        await update.message.reply_text(
+            f"Учасницю @{identifier} не знайдено в базі — створено новий запис з підпискою до {until_str}\n\n"
+            f"Коли вона напише /start — одразу отримає доступ."
+        )
 
 async def cmd_renew_sub(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id not in ADMIN_IDS:
@@ -2007,7 +2037,7 @@ async def handle_admin_input(update: Update, context: ContextTypes.DEFAULT_TYPE,
     elif waiting == "admin_import_subs":
         context.user_data["waiting_for"] = None
         lines = text.strip().split("\n")
-        imported, failed = 0, 0
+        imported, created, failed = 0, 0, 0
         conn = get_conn()
         for line in lines:
             line = line.strip()
@@ -2017,6 +2047,7 @@ async def handle_admin_input(update: Update, context: ContextTypes.DEFAULT_TYPE,
             if m:
                 identifier = m.group(1).lstrip("@")
                 until_str = m.group(2)
+                # Спробуємо оновити існуючу
                 result = conn.execute("""
                     UPDATE members SET subscription_until=? WHERE
                     LOWER(username)=LOWER(?) OR LOWER(username)=LOWER(?) OR LOWER(name) LIKE LOWER(?)
@@ -2024,12 +2055,22 @@ async def handle_admin_input(update: Update, context: ContextTypes.DEFAULT_TYPE,
                 if result.rowcount:
                     imported += 1
                 else:
-                    failed += 1
+                    # Створюємо нову з username але без telegram_id
+                    conn.execute(
+                        "INSERT INTO members (name, username, subscription_until) VALUES (?,?,?)",
+                        (identifier, f"@{identifier}", until_str)
+                    )
+                    created += 1
             else:
                 failed += 1
         conn.commit()
         conn.close()
-        await update.message.reply_text(f"Імпортовано: {imported}\nНе знайдено: {failed}")
+        await update.message.reply_text(
+            f"Оновлено: {imported}\n"
+            f"Створено нових: {created}\n"
+            f"Помилок формату: {failed}\n\n"
+            f"Коли дівчина напише /start — вона одразу отримає доступ за підпискою."
+        )
 
     elif waiting == "admin_event_title":
         context.user_data["new_event"]["title"] = text
