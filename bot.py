@@ -44,8 +44,17 @@ FORWARD_CHANNEL_ID  = int(os.getenv("FORWARD_CHANNEL_ID", "0"))
 WFP_MERCHANT    = os.getenv("WFP_MERCHANT_ACCOUNT", "")
 WFP_SECRET      = os.getenv("WFP_SECRET_KEY", "")
 WFP_DOMAIN      = os.getenv("WFP_DOMAIN", "your-domain.railway.app")
+WFP_SUB_URL     = os.getenv("WFP_SUB_URL", "https://secure.wayforpay.com/sub/womenscommune")
 
-# Ціни підписки (грн)
+# Назви продуктів WayForPay (для визначення плану з webhook)
+WFP_PRODUCT_3M  = os.getenv("WFP_PRODUCT_3M", "Легкий старт")
+WFP_PRODUCT_6M  = os.getenv("WFP_PRODUCT_6M", "Впевнена стабільність")
+WFP_PRODUCT_1Y  = os.getenv("WFP_PRODUCT_1Y", "Тотальна довіра")
+
+# Gemini API для розпізнавання подій
+GEMINI_API_KEY  = os.getenv("GEMINI_API_KEY", "")
+
+# Ціни підписки (грн) — для відображення залишаємо як fallback
 SUB_PRICE_3M = int(os.getenv("SUB_PRICE_3M", "500"))
 SUB_PRICE_6M = int(os.getenv("SUB_PRICE_6M", "1000"))
 SUB_PRICE_1Y = int(os.getenv("SUB_PRICE_1Y", "1800"))
@@ -186,6 +195,14 @@ def init_db():
             log_type  TEXT NOT NULL,
             sent_date TEXT NOT NULL,
             UNIQUE (member_id, log_type, sent_date)
+        );
+
+        CREATE TABLE IF NOT EXISTS message_activity (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            member_id   INTEGER,
+            msg_date    TEXT,
+            msg_count   INTEGER DEFAULT 0,
+            UNIQUE (member_id, msg_date)
         );
 
         CREATE TABLE IF NOT EXISTS wfp_orders (
@@ -495,6 +512,22 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await start_onboarding(update, context)
         return
 
+    # Якщо є підписка але немає телефону — разове прохання вказати
+    if not member.get("phone") and not context.user_data.get("phone_requested"):
+        context.user_data["phone_requested"] = True
+        context.user_data["waiting_for"] = "phone_update"
+        await update.message.reply_text(
+            "Привіт! Ми оновили бота.\n\n"
+            "Щоб підписка активувалась автоматично після оплати — вкажи свій номер телефону.\n"
+            "Телефон також буде видно іншим учасницям для відправки Нової пошти.\n\n"
+            "Напиши номер телефону (наприклад: +380991234567)\n"
+            "_(або «-» щоб пропустити)_",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("Пропустити", callback_data="skip_phone")
+            ]])
+        )
+        return
+
     await show_main_menu(update, context, member)
     await _check_urgent_birthdays(context)
 
@@ -524,6 +557,7 @@ ONBOARDING_STEPS = ["birthday", "city", "nova_poshta", "instagram", "favorite_co
 ONBOARDING_QUESTIONS = {
     "birthday":      "Введи свій день народження у форматі ДД.ММ.РРРР\nНаприклад: 25.04.1995\n_(або «-» щоб пропустити)_",
     "city":          "Напиши своє місто\nНаприклад: Київ\n_(або «-» щоб пропустити)_",
+    "phone":         "Напиши свій номер телефону\nНаприклад: +380991234567\n\nЦей номер буде видно іншим учасницям для відправки Нової пошти\n_(або «-» щоб пропустити)_",
     "nova_poshta":   "Напиши своє відділення Нової пошти\nНаприклад: НП відділення 47, Київ\n_(або «-» щоб пропустити)_",
     "instagram":     "Напиши свій Instagram нікнейм\nНаприклад: @kateryna\n_(або «-» щоб пропустити)_",
     "favorite_color":"Напиши свій улюблений колір\nНаприклад: лавандовий\n_(або «-» щоб пропустити)_",
@@ -558,6 +592,14 @@ async def handle_onboarding_step(update: Update, context: ContextTypes.DEFAULT_T
     elif step == "city":
         if text != "-":
             conn.execute("UPDATE members SET city=? WHERE telegram_id=?", (text, user_id))
+        conn.commit()
+        conn.close()
+        context.user_data["onboarding_step"] = "phone"
+        await update.message.reply_text(ONBOARDING_QUESTIONS["phone"])
+
+    elif step == "phone":
+        if text != "-":
+            conn.execute("UPDATE members SET phone=? WHERE telegram_id=?", (text, user_id))
         conn.commit()
         conn.close()
         context.user_data["onboarding_step"] = "nova_poshta"
@@ -606,15 +648,13 @@ async def handle_onboarding_step(update: Update, context: ContextTypes.DEFAULT_T
 
 async def show_subscription_plans(query, member_id: int):
     text = (
-        "Обери план підписки:\n\n"
-        f"3 місяці — {SUB_PRICE_3M} грн\n"
-        f"6 місяців — {SUB_PRICE_6M} грн\n"
-        f"1 рік — {SUB_PRICE_1Y} грн"
+        "Приєднуйся до Комуни Жіноцтва!\n\n"
+        "Натисни кнопку нижче щоб обрати план і оплатити.\n\n"
+        "Після оплати підписка активується автоматично."
     )
     keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton(f"3 місяці — {SUB_PRICE_3M} грн", callback_data=f"sub_3m_{member_id}")],
-        [InlineKeyboardButton(f"6 місяців — {SUB_PRICE_6M} грн", callback_data=f"sub_6m_{member_id}")],
-        [InlineKeyboardButton(f"1 рік — {SUB_PRICE_1Y} грн", callback_data=f"sub_1y_{member_id}")],
+        [InlineKeyboardButton("Хочу приєднатись", url=WFP_SUB_URL)],
+        [InlineKeyboardButton("Я оплатила", callback_data=f"sub_paid_{member_id}")],
         [back_btn("Назад", "menu")],
     ])
     await query.edit_message_text(text, reply_markup=keyboard)
@@ -740,9 +780,11 @@ async def do_search(update: Update, context: ContextTypes.DEFAULT_TYPE, search_t
 
     wl_str = f"Вішліст:\n{m['wishlist']}\n" if m.get("wishlist") else ""
 
+    phone_str = f"Телефон: {m['phone']}\n" if m.get("phone") else ""
     text = (
         f"Учасниця: {m['name']}\n"
         f"Місто: {m.get('city') or 'не вказано'}\n"
+        f"Телефон: {m.get('phone') or 'не вказано'}\n"
         f"НП: {m.get('nova_poshta') or 'не вказано'}\n"
         f"{insta_str}"
         f"Улюблений колір: {m.get('favorite_color') or 'не вказано'}\n"
@@ -901,6 +943,56 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data == "menu":
         await show_main_menu(query, context, member)
 
+    elif data == "skip_phone":
+        context.user_data.pop("waiting_for", None)
+        await show_main_menu(query, context, member)
+
+    # AI події
+    elif data == "ai_add_event":
+        event = context.bot_data.pop(f"ai_event_{user_id}", None)
+        if event:
+            conn = get_conn()
+            is_paid = 1 if event.get("price") else 0
+            conn.execute("""
+                INSERT INTO events (title, description, location, event_date, event_time,
+                                   is_paid, price, max_spots, spots_left)
+                VALUES (?,?,?,?,?,?,?,0,0)
+            """, (
+                event.get("title", "Зустріч"),
+                event.get("description", ""),
+                event.get("location", ""),
+                event.get("date", date.today().isoformat()),
+                event.get("time", ""),
+                is_paid,
+                event.get("price") or 0,
+            ))
+            conn.commit()
+            conn.close()
+            await query.edit_message_text("Подію додано!")
+        else:
+            await query.edit_message_text("Дані події не знайдено")
+
+    elif data == "ai_edit_event":
+        event = context.bot_data.get(f"ai_event_{user_id}")
+        if event:
+            context.user_data["new_event"] = {
+                "title": event.get("title", ""),
+                "event_date": event.get("date", ""),
+                "event_time": event.get("time", ""),
+                "location": event.get("location", ""),
+                "description": event.get("description", ""),
+                "price": event.get("price") or 0,
+                "is_paid": 1 if event.get("price") else 0,
+                "max_spots": 0, "spots_left": 0,
+            }
+            await _save_event(query, context)
+        else:
+            await query.edit_message_text("Дані події не знайдено")
+
+    elif data == "ai_skip_event":
+        context.bot_data.pop(f"ai_event_{user_id}", None)
+        await query.edit_message_text("Скасовано")
+
     elif data == "noop":
         pass
 
@@ -908,7 +1000,11 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "subscribe":
         await show_subscription_plans(query, member["id"])
 
-    elif data.startswith("sub_") and not data.startswith("sub_reminder"):
+    elif data.startswith("sub_paid_"):
+        mid = int(data.split("_")[2])
+        await handle_sub_paid_button(query, context, mid)
+
+    elif data.startswith("sub_") and not data.startswith("sub_reminder") and not data.startswith("sub_paid"):
         parts = data.split("_")
         if len(parts) == 3:
             plan = parts[1]
@@ -948,7 +1044,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         event_id = int(data.split("_")[2])
         conn = get_conn()
         conn.execute("""
-            UPDATE payments SET paid=1, paid_at=?
+            UPDATE payments SET paid=1, confirmed=1, paid_at=?
             WHERE event_id=? AND member_id=?
         """, (datetime.now().isoformat(), event_id, member["id"]))
         conn.commit()
@@ -957,20 +1053,15 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         bd_name = ev["birthday_person_name"] if ev else ""
         await query.edit_message_text(
-            f"Дякуємо за внесок в комуну! Оплату на ДН {bd_name} зафіксовано.\nАдмін підтвердить найближчим часом."
+            f"Дякуємо за внесок! Оплату на ДН {bd_name} зафіксовано."
         )
 
-        # Повідомлення адміну для підтвердження
+        # Просто повідомляємо адміна без підтвердження
         for admin_id in ADMIN_IDS:
             try:
                 await context.bot.send_message(
                     admin_id,
-                    f"{query.from_user.full_name} відмітила оплату на ДН {bd_name}\n"
-                    f"Подія #{event_id}",
-                    reply_markup=InlineKeyboardMarkup([[
-                        InlineKeyboardButton("Підтвердити", callback_data=f"admin_confirm_pay_{event_id}_{member['id']}"),
-                        InlineKeyboardButton("Відхилити", callback_data=f"admin_reject_pay_{event_id}_{member['id']}"),
-                    ]])
+                    f"💰 {query.from_user.full_name} відмітила оплату на ДН {bd_name}"
                 )
             except Exception:
                 pass
@@ -1087,8 +1178,15 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 logger.error(f"Помилка пересилання: {e}")
         return
 
-    # Повідомлення в групі — парсинг дат народження з гілки анкет
+    # Повідомлення в групі
     if update.effective_chat and update.effective_chat.type in ("group", "supergroup"):
+        # Трекінг активності
+        if message.chat_id == GROUP_CHAT_ID and message.from_user:
+            _track_message_activity(message.from_user.id)
+
+        # AI аналіз для розпізнавання подій
+        if GEMINI_API_KEY and message.chat_id == GROUP_CHAT_ID:
+            await handle_group_message_ai(update, context)
         msg = update.message
         if not msg:
             return
@@ -1127,6 +1225,19 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Онбординг
     if context.user_data.get("onboarding_step"):
         await handle_onboarding_step(update, context, context.user_data["onboarding_step"], text)
+        return
+
+    # Оновлення телефону (разове прохання)
+    if context.user_data.get("waiting_for") == "phone_update":
+        context.user_data.pop("waiting_for", None)
+        if text != "-":
+            conn = get_conn()
+            conn.execute("UPDATE members SET phone=? WHERE telegram_id=?", (text, user_id))
+            conn.commit()
+            conn.close()
+            await update.message.reply_text("Телефон збережено!")
+        member = get_member(user_id)
+        await show_main_menu(update, context, member)
         return
 
     # Постійна кнопка "Головне меню"
@@ -1306,6 +1417,47 @@ async def cmd_renew_sub(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn.commit()
     conn.close()
     await update.message.reply_text(f"Підписку поновлено до {new_until}")
+
+async def cmd_sub_expired(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/subexpired — список дівчат без підписки або з простроченою."""
+    if update.effective_user.id not in ADMIN_IDS:
+        return
+    today = date.today().isoformat()
+    conn = get_conn()
+    # Без підписки взагалі
+    no_sub = conn.execute("""
+        SELECT name, username FROM members
+        WHERE is_active=1 AND (subscription_until IS NULL OR subscription_until = '')
+        ORDER BY name
+    """).fetchall()
+    # З простроченою
+    expired = conn.execute("""
+        SELECT name, username, subscription_until FROM members
+        WHERE is_active=1 AND subscription_until IS NOT NULL
+        AND subscription_until < ?
+        ORDER BY subscription_until
+    """, (today,)).fetchall()
+    conn.close()
+
+    lines = [f"Підписки що потребують уваги:\n"]
+
+    if expired:
+        lines.append(f"Прострочена підписка ({len(expired)}):")
+        for r in expired:
+            uname = f" {r['username']}" if r["username"] else ""
+            lines.append(f"  • {r['name']}{uname} — закінчилась {r['subscription_until']}")
+
+    if no_sub:
+        lines.append(f"\nБез підписки ({len(no_sub)}):")
+        for r in no_sub:
+            uname = f" {r['username']}" if r["username"] else ""
+            lines.append(f"  • {r['name']}{uname}")
+
+    if not expired and not no_sub:
+        lines.append("Всі учасниці мають активну підписку!")
+
+    await update.message.reply_text("\n".join(lines))
+
 
 async def cmd_sub_expiring(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id not in ADMIN_IDS:
@@ -1670,6 +1822,14 @@ def _personal_announce_text(member: dict, amount: int) -> str:
         f"Після переказу натисни кнопку"
     )
 
+async def _group_birthday_text_ai(member: dict, bd_date: date, bot=None) -> str:
+    """Генерує привітання через Gemini або fallback."""
+    if GEMINI_API_KEY:
+        result = await gemini_birthday_greeting(member, bd_date)
+        if result:
+            return result
+    return _group_birthday_text(member, bd_date)
+
 def _group_birthday_text(member: dict, bd_date: date) -> str:
     mo, d = bd_date.month, bd_date.day
     uname = member.get("username")
@@ -1690,6 +1850,12 @@ def _group_birthday_text(member: dict, bd_date: date) -> str:
 
 # ─── Надсилання в групу ───────────────────────────────────────────────────────
 
+async def send_warm(chat_id: int, text: str, bot, **kwargs):
+    """Надсилає повідомлення через Gemini для теплого стилю."""
+    warm_text = await gemini_warm_message(text)
+    await bot.send_message(chat_id=chat_id, text=warm_text, **kwargs)
+
+
 async def send_to_group(context: ContextTypes.DEFAULT_TYPE, text: str, congrats: bool = False):
     if not GROUP_CHAT_ID:
         return
@@ -1708,6 +1874,162 @@ async def send_to_group(context: ContextTypes.DEFAULT_TYPE, text: str, congrats:
             await context.bot.send_message(**kwargs2)
         except Exception as e:
             logger.error(f"Помилка надсилання в гілку привітань: {e}")
+
+# ─── Щотижневі задачі ────────────────────────────────────────────────────────
+
+async def job_monday_digest(context: ContextTypes.DEFAULT_TYPE):
+    """Щопонеділка о 10:00 Київ — дайджест в загальний чат."""
+    if not GROUP_CHAT_ID:
+        return
+    logger.info("Щопонеділковий дайджест")
+
+    # Майбутні події на тиждень
+    next_week = (date.today() + timedelta(days=7)).isoformat()
+    today_str = date.today().isoformat()
+    conn = get_conn()
+    events = conn.execute("""
+        SELECT * FROM events WHERE is_active=1
+        AND event_date BETWEEN ? AND ?
+        ORDER BY event_date
+    """, (today_str, next_week)).fetchall()
+    conn.close()
+
+    new_members = _get_new_members_week()
+    active_members = _get_active_members_week()
+
+    # Генеруємо теплий дайджест через Gemini
+    text = await gemini_weekly_digest(
+        [dict(e) for e in events],
+        new_members,
+        active_members
+    )
+
+    if not text:
+        # Fallback якщо Gemini недоступний
+        lines = ["Привіт, дівчата! Починаємо новий тиждень разом!\n"]
+        if events:
+            lines.append("На цьому тижні:")
+            for ev in events:
+                ev = dict(ev)
+                lines.append(f"  • {ev['title']} — {ev['event_date']}")
+        if new_members:
+            lines.append("\nНові учасниці:")
+            for m in new_members:
+                lines.append(f"  • {m['name']}")
+        text = "\n".join(lines)
+
+    await send_to_group(context, text)
+
+
+async def job_thursday_digest(context: ContextTypes.DEFAULT_TYPE):
+    """Щочетверга — особистий дайджест кожній учасниці."""
+    logger.info("Щочетверговий особистий дайджест")
+
+    # Майбутні події на наступний тиждень
+    next_week = (date.today() + timedelta(days=7)).isoformat()
+    today_str = date.today().isoformat()
+    conn = get_conn()
+    events = conn.execute("""
+        SELECT * FROM events WHERE is_active=1
+        AND event_date BETWEEN ? AND ?
+        ORDER BY event_date
+    """, (today_str, next_week)).fetchall()
+    events_list = [dict(e) for e in events]
+
+    members = conn.execute("""
+        SELECT * FROM members WHERE is_active=1
+        AND telegram_id IS NOT NULL
+        AND (subscription_until IS NULL OR subscription_until >= ?)
+    """, (today_str,)).fetchall()
+    conn.close()
+
+    sent = 0
+    for member in members:
+        m = dict(member)
+        if not m["telegram_id"]:
+            continue
+
+        # Знаходимо "buddy" з того ж міста
+        buddy = _get_buddy_for_member(m)
+
+        # Генеруємо персональний дайджест
+        text = await gemini_personal_digest(m, events_list, buddy)
+
+        if not text:
+            # Fallback
+            lines = ["Привіт! Ось що цікавого на наступний тиждень:\n"]
+            for ev in events_list:
+                lines.append(f"  • {ev['title']} — {ev['event_date']}")
+            if buddy:
+                lines.append(f"\nЗнайомся з {buddy['name']} — вона теж з {m.get('city', 'вашого міста')}!")
+            text = "\n".join(lines) if len(lines) > 1 else "На наступному тижні подій поки немає. Гарного дня!"
+
+        try:
+            await context.bot.send_message(
+                chat_id=m["telegram_id"],
+                text=text,
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("Переглянути всі події", callback_data="events")
+                ]])
+            )
+            sent += 1
+        except Exception as e:
+            logger.warning(f"Четверговий дайджест не надіслано {m['name']}: {e}")
+
+    logger.info(f"Четверговий дайджест: надіслано {sent}")
+
+
+async def job_auto_reply_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Автовідповідь на питання в групі."""
+    msg = update.message
+    if not msg or not msg.text:
+        return
+    if msg.chat_id != GROUP_CHAT_ID:
+        return
+
+    text = msg.text.lower()
+
+    # Визначаємо чи є питання
+    is_question = "?" in msg.text or any(w in text for w in [
+        "як", "де", "коли", "що таке", "розкажи", "підкажи",
+        "допоможи", "не можу", "не знаю", "скільки коштує",
+        "як оплатити", "де знайти", "як активувати"
+    ])
+    if not is_question:
+        return
+
+    # Визначаємо тему
+    topics = {
+        "підписка": ["підписка", "оплатити", "оплата", "скільки коштує", "поновити", "тариф", "план"],
+        "бот": ["бот", "активувати", "де знайти бота", "як користуватись", "команди"],
+        "нова пошта": ["нова пошта", "відділення", "адреса", "відправити"],
+        "події": ["подія", "зустріч", "захід", "зареєструватись", "розклад"],
+        "день народження": ["день народження", "вішліст", "подарунок", "збір", "скинутись"],
+    }
+
+    matched_topic = None
+    for topic, keywords in topics.items():
+        if any(kw in text for kw in keywords):
+            matched_topic = topic
+            break
+
+    if not matched_topic:
+        return
+
+    # Не відповідаємо частіше ніж раз на 5 хвилин на одну тему
+    last_reply_key = f"last_reply_{matched_topic}"
+    last_reply = context.bot_data.get(last_reply_key)
+    if last_reply and (datetime.now() - last_reply).seconds < 300:
+        return
+    context.bot_data[last_reply_key] = datetime.now()
+
+    reply = await gemini_auto_reply(msg.text, f"Тема: {matched_topic}")
+    if reply:
+        try:
+            await msg.reply_text(reply)
+        except Exception as e:
+            logger.error(f"Auto reply error: {e}")
+
 
 # ─── Планувальник ─────────────────────────────────────────────────────────────
 
@@ -1826,7 +2148,7 @@ async def _check_birthdays(context, today: date):
             log_reminder(m["id"], 1, today.year, "group")
 
         elif days_until == 0 and not already_reminded(m["id"], 0, today.year, "group"):
-            await send_to_group(context, _group_birthday_text(m, bd), congrats=True)
+            await send_to_group(context, await _group_birthday_text_ai(m, bd), congrats=True)
             log_reminder(m["id"], 0, today.year, "group")
 
 async def _check_subscriptions(context, today: date):
@@ -1979,6 +2301,294 @@ async def _check_urgent_birthdays(context: ContextTypes.DEFAULT_TYPE):
                 break
 
 # ─── Нова учасниця в групі ────────────────────────────────────────────────────
+
+# ─── Gemini хелпери ──────────────────────────────────────────────────────────
+
+async def gemini_generate(prompt: str, max_tokens: int = 500) -> str:
+    """Базовий виклик Gemini API."""
+    if not GEMINI_API_KEY:
+        return ""
+    try:
+        import aiohttp as _aiohttp
+        url = (
+            "https://generativelanguage.googleapis.com/v1beta/"
+            f"models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
+        )
+        async with _aiohttp.ClientSession() as session:
+            async with session.post(url, json={
+                "contents": [{"parts": [{"text": prompt}]}],
+                "generationConfig": {"maxOutputTokens": max_tokens, "temperature": 0.8}
+            }, timeout=_aiohttp.ClientTimeout(total=15)) as resp:
+                data = await resp.json()
+                return data["candidates"][0]["content"]["parts"][0]["text"].strip()
+    except Exception as e:
+        logger.error(f"Gemini error: {e}")
+        return ""
+
+
+async def gemini_warm_message(original_text: str) -> str:
+    """Перефразовує повідомлення у теплий живий стиль."""
+    if not GEMINI_API_KEY:
+        return original_text
+    prompt = (
+        "Ти — бот жіночої спільноти підтримки. Перефразуй це повідомлення "
+        "у дуже теплий, живий, дружній стиль — як від близької подруги. "
+        "Використовуй емодзі де доречно. Зберігай всі факти і посилання. "
+        "Відповідь тільки переформульованим текстом, без пояснень.\n\n"
+        f"Оригінал: {original_text}"
+    )
+    result = await gemini_generate(prompt, max_tokens=300)
+    return result if result else original_text
+
+
+async def gemini_birthday_greeting(member: dict, bd_date: date) -> str:
+    """Генерує персональне привітання на ДН."""
+    age = (bd_date.year - member["birth_year"]) if member.get("birth_year") else None
+    age_str = f", їй виповнюється {age} років" if age else ""
+    city_str = f", живе в {member['city']}" if member.get("city") else ""
+    color_str = f", улюблений колір — {member['favorite_color']}" if member.get("favorite_color") else ""
+    wishlist_str = f", вішліст: {member['wishlist']}" if member.get("wishlist") else ""
+    insta_str = f", інстаграм: {member['instagram']}" if member.get("instagram") else ""
+
+    prompt = (
+        f"Ти — бот жіночої спільноти підтримки Комуна Жіноцтва. "
+        f"Напиши дуже тепле, живе, щире привітання з днем народження для учасниці.\n\n"
+        f"Інфо про іменинницю: ім\'я — {member['name']}{age_str}{city_str}{color_str}{insta_str}{wishlist_str}\n\n"
+        f"Привітання має бути в загальний чат, звертатись до всіх дівчат, "
+        f"закликати привітати іменинницю. Додай емодзі. До 150 слів."
+    )
+    result = await gemini_generate(prompt, max_tokens=300)
+    return result if result else ""
+
+
+async def gemini_weekly_digest(events: list, new_members: list, active_members: list) -> str:
+    """Генерує тижневий дайджест для чату."""
+    events_str = "\n".join(
+        f"- {ev['title']} ({ev['event_date']} {ev.get('event_time','')}, {ev.get('location','')})"
+        for ev in events
+    ) if events else "Запланованих подій немає"
+
+    new_str = "\n".join(f"- {m['name']}" for m in new_members) if new_members else "Нових учасниць немає"
+    active_str = "\n".join(f"- {m['name']} ({m['msg_count']} повідомлень)" for m in active_members[:3]) if active_members else ""
+
+    prompt = (
+        f"Ти — бот жіночої спільноти Комуна Жіноцтва. "
+        f"Напиши теплий, живий дайджест на початок тижня для загального чату.\n\n"
+        f"Події на тиждень:\n{events_str}\n\n"
+        f"Нові учасниці минулого тижня:\n{new_str}\n\n"
+        f"Найактивніші минулого тижня:\n{active_str}\n\n"
+        f"Стиль: тепло, як від подруги, з емодзі. До 200 слів."
+    )
+    result = await gemini_generate(prompt, max_tokens=400)
+    return result if result else ""
+
+
+async def gemini_personal_digest(member: dict, events: list, buddy: Optional[dict]) -> str:
+    """Генерує персональний четверговий дайджест."""
+    events_str = "\n".join(
+        f"- {ev['title']} ({ev['event_date']} {ev.get('event_time','')}, {ev.get('location','')})"
+        for ev in events
+    ) if events else "Подій поки немає"
+
+    buddy_str = (
+        f"Учасниця з твого міста з якою можна познайомитись: "
+        f"{buddy['name']}"
+        f"{' (' + buddy['instagram'] + ')' if buddy.get('instagram') else ''}"
+    ) if buddy else ""
+
+    prompt = (
+        f"Ти — бот жіночої спільноти Комуна Жіноцтва. "
+        f"Напиши теплий особистий дайджест для учасниці {member['name']}.\n\n"
+        f"Події на наступний тиждень:\n{events_str}\n\n"
+        f"{buddy_str}\n\n"
+        f"Стиль: особистий, теплий, як від подруги. До 150 слів."
+    )
+    result = await gemini_generate(prompt, max_tokens=300)
+    return result if result else ""
+
+
+async def gemini_auto_reply(question: str, context_info: str = "") -> str:
+    """Автовідповідь на питання про адміністрування."""
+    prompt = (
+        f"Ти — бот жіночої спільноти Комуна Жіноцтва. "
+        f"Відповідай тепло і коротко на питання учасниці.\n\n"
+        f"Контекст про бота:\n"
+        f"- Підписка: 3 варіанти (Легкий старт / Впевнена стабільність / Тотальна довіра)\n"
+        f"- Активувати бота: написати /start в особисті\n"
+        f"- Події: кнопка 'Події' в меню бота\n"
+        f"- Вішліст: кнопка 'Вішліст' в меню\n"
+        f"- День народження: бот автоматично нагадує і збирає\n"
+        f"{context_info}\n\n"
+        f"Питання: {question}\n\n"
+        f"Відповідь до 100 слів, тепло і зрозуміло."
+    )
+    result = await gemini_generate(prompt, max_tokens=200)
+    return result if result else ""
+
+
+# ─── Gemini AI для розпізнавання подій ──────────────────────────────────────
+
+import json as _json
+
+def _track_message_activity(telegram_id: int):
+    """Відстежує кількість повідомлень учасниці."""
+    today = date.today().isoformat()
+    conn = get_conn()
+    member = conn.execute("SELECT id FROM members WHERE telegram_id=?", (telegram_id,)).fetchone()
+    if member:
+        conn.execute("""
+            INSERT INTO message_activity (member_id, msg_date, msg_count)
+            VALUES (?,?,1)
+            ON CONFLICT (member_id, msg_date)
+            DO UPDATE SET msg_count = msg_count + 1
+        """, (member["id"], today))
+        conn.commit()
+    conn.close()
+
+
+def _get_active_members_week() -> list:
+    """Повертає найактивніших учасниць за минулий тиждень."""
+    week_ago = (date.today() - timedelta(days=7)).isoformat()
+    conn = get_conn()
+    rows = conn.execute("""
+        SELECT m.name, m.username, m.instagram, SUM(a.msg_count) as msg_count
+        FROM message_activity a JOIN members m ON a.member_id=m.id
+        WHERE a.msg_date >= ?
+        GROUP BY m.id ORDER BY msg_count DESC LIMIT 5
+    """, (week_ago,)).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def _get_new_members_week() -> list:
+    """Повертає нових учасниць за минулий тиждень."""
+    week_ago = (date.today() - timedelta(days=7)).isoformat()
+    conn = get_conn()
+    rows = conn.execute("""
+        SELECT name, username FROM members
+        WHERE joined_at >= ? AND is_active=1
+        ORDER BY joined_at DESC
+    """, (week_ago,)).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def _get_buddy_for_member(member: dict) -> Optional[dict]:
+    """Знаходить учасницю з того ж міста для знайомства."""
+    if not member.get("city"):
+        return None
+    conn = get_conn()
+    row = conn.execute("""
+        SELECT name, username, instagram, city FROM members
+        WHERE is_active=1
+        AND id != ?
+        AND LOWER(city) LIKE LOWER(?)
+        AND telegram_id IS NOT NULL
+        ORDER BY RANDOM() LIMIT 1
+    """, (member["id"], f"%{member['city']}%")).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+async def gemini_detect_event(messages_text: str) -> Optional[dict]:
+    """Використовує Gemini щоб розпізнати подію з повідомлень групи."""
+    if not GEMINI_API_KEY:
+        return None
+    try:
+        import aiohttp as _aiohttp
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
+        prompt = (
+            "Проаналізуй повідомлення з чату жіночої спільноти. "
+            "Якщо дівчата домовляються про зустріч або подію — визнач параметри. "
+            "Якщо події немає — поверни null.\n\n"
+            f"Повідомлення:\n{messages_text}\n\n"
+            "Відповідь ТІЛЬКИ в JSON форматі (або null):\n"
+            "Приклад: {title: назва, date: РРРР-ММ-ДД, time: ЧЧ:ХХ, location: місце, price: число, description: опис}"
+        )
+        async with _aiohttp.ClientSession() as session:
+            async with session.post(url, json={
+                "contents": [{"parts": [{"text": prompt}]}]
+            }, timeout=_aiohttp.ClientTimeout(total=10)) as resp:
+                data = await resp.json()
+                text = data["candidates"][0]["content"]["parts"][0]["text"].strip()
+                if text.lower() == "null":
+                    return None
+                text = text.replace("```json", "").replace("```", "").strip()
+                return _json.loads(text)
+    except Exception as e:
+        logger.error(f"Gemini error: {e}")
+        return None
+
+
+# Буфер останніх повідомлень для аналізу
+_message_buffer: list = []
+_last_ai_check: datetime = datetime.now() - timedelta(minutes=10)
+
+async def handle_group_message_ai(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Збирає повідомлення групи і передає Gemini для аналізу."""
+    global _last_ai_check
+    msg = update.message
+    if not msg or not msg.text:
+        return
+    if msg.chat_id != GROUP_CHAT_ID:
+        return
+
+    # Додаємо в буфер
+    _message_buffer.append(f"{msg.from_user.first_name}: {msg.text}")
+    if len(_message_buffer) > 20:
+        _message_buffer.pop(0)
+
+    # Перевіряємо не частіше ніж раз на 5 хвилин
+    now = datetime.now()
+    if (now - _last_ai_check).seconds < 300:
+        return
+    _last_ai_check = now
+
+    # Ключові слова що вказують на домовленість
+    keywords = ["зустрінемось", "зустріч", "зібратись", "прийдіть", "приходьте",
+                "захід", "подія", "о котрій", "де зустрічаємось", "місце зустрічі"]
+    buffer_text = " ".join(_message_buffer).lower()
+    if not any(kw in buffer_text for kw in keywords):
+        return
+
+    event = await gemini_detect_event("\n".join(_message_buffer))
+    if not event:
+        return
+
+    # Надсилаємо адміну для підтвердження
+    price_str = f"{event.get('price')} грн" if event.get("price") else "безкоштовно"
+    text = (
+        f"Схоже дівчата домовились про зустріч:\n\n"
+        f"Назва: {event.get('title', 'не визначено')}\n"
+        f"Дата: {event.get('date', 'не визначено')}\n"
+        f"Час: {event.get('time') or 'не вказано'}\n"
+        f"Місце: {event.get('location') or 'не вказано'}\n"
+        f"Вартість: {price_str}\n"
+        f"Опис: {event.get('description', '')}\n\n"
+        f"Додати подію?"
+    )
+
+    import json as jj
+    event_json = jj.dumps(event, ensure_ascii=False)
+
+    for admin_id in ADMIN_IDS:
+        try:
+            await context.bot.send_message(
+                admin_id,
+                text,
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("Додати подію", callback_data=f"ai_add_event")],
+                    [InlineKeyboardButton("Редагувати", callback_data=f"ai_edit_event")],
+                    [InlineKeyboardButton("Скасувати", callback_data=f"ai_skip_event")],
+                ])
+            )
+            # Зберігаємо дані події для обробки
+            context.bot_data[f"ai_event_{admin_id}"] = event
+        except Exception as e:
+            logger.error(f"AI event notify error: {e}")
+
+    _message_buffer.clear()
+
 
 async def handle_new_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
     result = update.chat_member
@@ -2173,7 +2783,8 @@ async def handle_admin_input(update: Update, context: ContextTypes.DEFAULT_TYPE,
         context.user_data["new_event"]["wfp_link"] = text if text != "-" else ""
         await _save_event(update, context)
 
-async def _save_event(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def _save_event(update_or_query, context: ContextTypes.DEFAULT_TYPE):
+    update = update_or_query  # works with both Update and CallbackQuery
     ev = context.user_data.pop("new_event", {})
     context.user_data["waiting_for"] = None
     conn = get_conn()
@@ -2200,51 +2811,152 @@ async def _save_event(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ─── WFP Webhook ─────────────────────────────────────────────────────────────
 
+def _get_sub_months_by_product(product_name: str) -> int:
+    """Визначає кількість місяців підписки за назвою продукту WFP."""
+    if not product_name:
+        return 0
+    if WFP_PRODUCT_3M and WFP_PRODUCT_3M.lower() in product_name.lower():
+        return 3
+    if WFP_PRODUCT_6M and WFP_PRODUCT_6M.lower() in product_name.lower():
+        return 6
+    if WFP_PRODUCT_1Y and WFP_PRODUCT_1Y.lower() in product_name.lower():
+        return 12
+    return 0
+
+async def _activate_subscription(bot, member_id: int, months: int):
+    """Активує підписку для учасниці."""
+    plan_names = {3: "3 місяці", 6: "6 місяців", 12: "рік"}
+    new_until = (date.today() + timedelta(days=30 * months)).isoformat()
+    conn = get_conn()
+    conn.execute("UPDATE members SET subscription_until=?, subscription_plan=? WHERE id=?",
+                 (new_until, f"{months}m", member_id))
+    conn.commit()
+    m = conn.execute("SELECT telegram_id, name FROM members WHERE id=?", (member_id,)).fetchone()
+    conn.close()
+    if m and m["telegram_id"]:
+        try:
+            await bot.send_message(
+                m["telegram_id"],
+                f"Підписку активовано! ({plan_names.get(months, str(months) + ' міс')})"
+                f"\n\nДіє до: {new_until}"
+                f"\n\nПосилання на чат:\n{INVITE_LINK}"
+            )
+        except Exception:
+            pass
+    logger.info(f"Підписку активовано для member_id={member_id}, до {new_until}")
+
 async def wfp_webhook(request):
-    """Обробник webhook від WayForPay."""
+    """Обробник webhook від WayForPay — автоматична активація підписки."""
     try:
         data = await request.json()
-        order_ref = data.get("orderReference")
         status = data.get("transactionStatus")
-        if not order_ref or not status:
+        phone = data.get("phone", "").replace(" ", "").replace("-", "")
+        email = data.get("email", "")
+        product_name = ""
+
+        # Назва продукту може бути в різних полях
+        products = data.get("products", [])
+        if products and isinstance(products, list):
+            product_name = products[0].get("name", "")
+        if not product_name:
+            product_name = data.get("productName", "")
+
+        if status != "Approved":
             return web.Response(text="ok")
 
-        conn = get_conn()
-        order = conn.execute("SELECT * FROM wfp_orders WHERE order_ref=?", (order_ref,)).fetchone()
-        if not order:
-            conn.close()
-            return web.Response(text="ok")
-
-        order = dict(order)
-        if status == "Approved":
-            conn.execute("UPDATE wfp_orders SET status='paid' WHERE order_ref=?", (order_ref,))
-            # Підписка
-            if order["order_type"].startswith("sub_"):
-                plan = order["order_type"].replace("sub_", "")
-                months = {"3m": 3, "6m": 6, "1y": 12}.get(plan, 3)
-                new_until = (date.today() + timedelta(days=30 * months)).isoformat()
-                conn.execute("UPDATE members SET subscription_until=?, subscription_plan=? WHERE id=?",
-                             (new_until, plan, order["member_id"]))
-                conn.commit()
-                m = conn.execute("SELECT telegram_id FROM members WHERE id=?",
-                                 (order["member_id"],)).fetchone()
-                conn.close()
-                if m and m["telegram_id"]:
+        months = _get_sub_months_by_product(product_name)
+        if months == 0:
+            logger.warning(f"WFP: не визначено план за продуктом: {product_name}")
+            # Повідомляємо адміна
+            bot_app = request.app.get("bot_app")
+            if bot_app:
+                for admin_id in ADMIN_IDS:
                     try:
-                        app = request.app["bot_app"]
-                        await app.bot.send_message(
-                            m["telegram_id"],
-                            f"Підписку активовано до {new_until}!\n\nПосилання на чат:\n{INVITE_LINK}"
+                        await bot_app.bot.send_message(
+                            admin_id,
+                            f"WFP оплата не розпізнана:\n"
+                            f"Продукт: {product_name}\n"
+                            f"Телефон: {phone}\n"
+                            f"Email: {email}\n\n"
+                            f"Активуй вручну через /setsub"
                         )
                     except Exception:
                         pass
+            return web.Response(text="ok")
+
+        # Шукаємо учасницю за телефоном
+        conn = get_conn()
+        member = None
+        if phone:
+            # Нормалізуємо телефон для пошуку
+            for fmt in [phone, "+" + phone.lstrip("+"), phone.replace("+38", "")]:
+                row = conn.execute(
+                    "SELECT * FROM members WHERE REPLACE(REPLACE(phone, ' ', ''), '-', '') LIKE ?",
+                    (f"%{fmt.lstrip('+')}%",)
+                ).fetchone()
+                if row:
+                    member = dict(row)
+                    break
+
+        # Якщо не знайшли за телефоном — шукаємо за email
+        if not member and email:
+            row = conn.execute(
+                "SELECT * FROM members WHERE LOWER(instagram) LIKE LOWER(?)", (f"%{email.split('@')[0]}%",)
+            ).fetchone()
+            if row:
+                member = dict(row)
+
+        conn.close()
+
+        bot_app = request.app.get("bot_app")
+
+        if member:
+            if bot_app:
+                await _activate_subscription(bot_app.bot, member["id"], months)
         else:
-            conn.execute("UPDATE wfp_orders SET status='failed' WHERE order_ref=?", (order_ref,))
-            conn.commit()
-            conn.close()
+            # Не знайшли — адміну на ручне підтвердження
+            logger.warning(f"WFP: учасницю не знайдено. Телефон: {phone}, Email: {email}")
+            if bot_app:
+                for admin_id in ADMIN_IDS:
+                    try:
+                        await bot_app.bot.send_message(
+                            admin_id,
+                            f"Нова оплата підписки, але учасницю не знайдено:\n"
+                            f"Продукт: {product_name} ({months} міс)\n"
+                            f"Телефон: {phone}\n"
+                            f"Email: {email}\n\n"
+                            f"Активуй вручну:\n/setsub @нік {(date.today() + timedelta(days=30*months)).isoformat()}"
+                        )
+                    except Exception:
+                        pass
+
     except Exception as e:
         logger.error(f"WFP webhook error: {e}")
     return web.Response(text="ok")
+
+
+async def handle_sub_paid_button(query, context, member_id: int):
+    """Кнопка 'Я оплатила' для підписки — повідомляємо адміна."""
+    member = get_member_by_id(member_id)
+    name = member["name"] if member else "невідома"
+    uname = member.get("username", "") if member else ""
+
+    for admin_id in ADMIN_IDS:
+        try:
+            await context.bot.send_message(
+                admin_id,
+                f"Оплата підписки очікує підтвердження:\n"
+                f"{name} {uname}\n\n"
+                f"Якщо оплата не активувалась автоматично — активуй вручну:\n"
+                f"/renewsub {uname or name} 3"
+            )
+        except Exception:
+            pass
+
+    await query.edit_message_text(
+        "Дякуємо! Якщо оплата пройшла успішно — підписку буде активовано автоматично.\n\n"
+        "Якщо протягом 10 хвилин нічого не змінилось — напиши адміну."
+    )
 
 # ─── Запуск ───────────────────────────────────────────────────────────────────
 
@@ -2267,6 +2979,7 @@ def main():
     app.add_handler(CommandHandler("setsub",       cmd_set_sub))
     app.add_handler(CommandHandler("renewsub",     cmd_renew_sub))
     app.add_handler(CommandHandler("subexpiring",  cmd_sub_expiring))
+    app.add_handler(CommandHandler("subexpired",   cmd_sub_expired))
     app.add_handler(CommandHandler("importsubs",   cmd_import_subs))
     app.add_handler(CommandHandler("bycity",       cmd_by_city))
     app.add_handler(CommandHandler("addevent",     cmd_add_event))
@@ -2282,13 +2995,33 @@ def main():
 
     # Повідомлення
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+    app.add_handler(MessageHandler(
+        filters.TEXT & ~filters.COMMAND & filters.Chat(GROUP_CHAT_ID) if GROUP_CHAT_ID else filters.TEXT & ~filters.COMMAND,
+        job_auto_reply_group
+    ), group=1)
     app.add_handler(ChatMemberHandler(handle_new_member, ChatMemberHandler.CHAT_MEMBER))
 
-    # Планувальник
+    # Планувальник — щоденна перевірка
     app.job_queue.run_daily(
         daily_check,
         time=dtime(hour=CHECK_HOUR_UTC, minute=0),
         name="daily_check"
+    )
+
+    # Щопонеділкового дайджест о 10:00 Київ (UTC+3 → 07:00 UTC)
+    app.job_queue.run_daily(
+        job_monday_digest,
+        time=dtime(hour=7, minute=0),
+        days=(0,),  # 0 = понеділок
+        name="monday_digest"
+    )
+
+    # Щочетверговий особистий дайджест о 12:00 Київ (09:00 UTC)
+    app.job_queue.run_daily(
+        job_thursday_digest,
+        time=dtime(hour=9, minute=0),
+        days=(3,),  # 3 = четвер
+        name="thursday_digest"
     )
 
     logger.info("Community Bot запущено!")
