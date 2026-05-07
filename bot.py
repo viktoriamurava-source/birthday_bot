@@ -1184,6 +1184,10 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if message.chat_id == GROUP_CHAT_ID and message.from_user:
             _track_message_activity(message.from_user.id)
 
+        # Автовідповідь на питання в групі
+        if GEMINI_API_KEY and message.chat_id == GROUP_CHAT_ID:
+            await job_auto_reply_group(update, context)
+
         # AI аналіз для розпізнавання подій
         if GEMINI_API_KEY and message.chat_id == GROUP_CHAT_ID:
             await handle_group_message_ai(update, context)
@@ -2994,10 +2998,7 @@ def main():
 
     # Повідомлення
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
-    app.add_handler(MessageHandler(
-        filters.TEXT & ~filters.COMMAND & filters.Chat(GROUP_CHAT_ID) if GROUP_CHAT_ID else filters.TEXT & ~filters.COMMAND,
-        job_auto_reply_group
-    ), group=1)
+
     app.add_handler(ChatMemberHandler(handle_new_member, ChatMemberHandler.CHAT_MEMBER))
 
     # Планувальник — щоденна перевірка
