@@ -2310,8 +2310,7 @@ async def gemini_generate(prompt: str, max_tokens: int = 500) -> str:
     try:
         import aiohttp as _aiohttp
         url = (
-            "https://generativelanguage.googleapis.com/v1beta/"
-            f"models/gemini-1.5-flash-latest:generateContent?key={GEMINI_API_KEY}"
+            f"https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
         )
         async with _aiohttp.ClientSession() as session:
             async with session.post(url, json={
