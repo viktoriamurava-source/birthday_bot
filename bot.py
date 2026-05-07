@@ -2312,7 +2312,7 @@ async def gemini_generate(prompt: str, max_tokens: int = 500) -> str:
         import aiohttp as _aiohttp
         url = (
             "https://generativelanguage.googleapis.com/v1beta/"
-            f"models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
+            f"models/gemini-2.0-flash-lite:generateContent?key={GEMINI_API_KEY}"
         )
         async with _aiohttp.ClientSession() as session:
             async with session.post(url, json={
@@ -2320,7 +2320,11 @@ async def gemini_generate(prompt: str, max_tokens: int = 500) -> str:
                 "generationConfig": {"maxOutputTokens": max_tokens, "temperature": 0.8}
             }, timeout=_aiohttp.ClientTimeout(total=15)) as resp:
                 data = await resp.json()
-                return data["candidates"][0]["content"]["parts"][0]["text"].strip()
+                candidates = data.get("candidates", [])
+                if not candidates:
+                    logger.error(f"Gemini no candidates: {data}")
+                    return ""
+                return candidates[0]["content"]["parts"][0]["text"].strip()
     except Exception as e:
         logger.error(f"Gemini error: {e}")
         return ""
@@ -2496,7 +2500,7 @@ async def gemini_detect_event(messages_text: str) -> Optional[dict]:
         return None
     try:
         import aiohttp as _aiohttp
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-lite:generateContent?key={GEMINI_API_KEY}"
         prompt = (
             "Проаналізуй повідомлення з чату жіночої спільноти. "
             "Якщо дівчата домовляються про зустріч або подію — визнач параметри. "
