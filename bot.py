@@ -1850,11 +1850,6 @@ def _group_birthday_text(member: dict, bd_date: date) -> str:
 
 # ─── Надсилання в групу ───────────────────────────────────────────────────────
 
-async def send_warm(chat_id: int, text: str, bot, **kwargs):
-    """Надсилає повідомлення через Gemini для теплого стилю."""
-    warm_text = await gemini_warm_message(text)
-    await bot.send_message(chat_id=chat_id, text=warm_text, **kwargs)
-
 
 async def send_to_group(context: ContextTypes.DEFAULT_TYPE, text: str, congrats: bool = False):
     if not GROUP_CHAT_ID:
@@ -2312,7 +2307,7 @@ async def gemini_generate(prompt: str, max_tokens: int = 500) -> str:
         import aiohttp as _aiohttp
         url = (
             "https://generativelanguage.googleapis.com/v1beta/"
-            f"models/gemini-2.0-flash-lite:generateContent?key={GEMINI_API_KEY}"
+            f"models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
         )
         async with _aiohttp.ClientSession() as session:
             async with session.post(url, json={
@@ -2500,7 +2495,7 @@ async def gemini_detect_event(messages_text: str) -> Optional[dict]:
         return None
     try:
         import aiohttp as _aiohttp
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-lite:generateContent?key={GEMINI_API_KEY}"
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
         prompt = (
             "Проаналізуй повідомлення з чату жіночої спільноти. "
             "Якщо дівчата домовляються про зустріч або подію — визнач параметри. "
