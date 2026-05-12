@@ -868,6 +868,20 @@ async def handle_auto_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await msg.reply_text(reply)
         except Exception as e:
             logger.error(f"Auto reply error: {e}")
+    else:
+        # Fallback якщо Gemini не відповів
+        fallback = {
+            "підписка": "Для оплати або поновлення підписки — напиши @vmuravska, вона допоможе!",
+            "бот": "Щоб активувати бота — напиши йому /start в особисті. Якщо щось не виходить — @vmuravska допоможе!",
+            "нова пошта": "Адресу для відправки знайдеш в профілі учасниці через бота. Питання — @vmuravska!",
+            "події": "Всі актуальні події є в боті — натисни 'Події' в меню. Питання — @vmuravska!",
+            "день народження": "Інфо про іменинницю та збір приходить особисто в бот. Питання — @vmuravska!",
+        }
+        text = fallback.get(matched, f"Дякуємо за питання! @vmuravska зможе допомогти 💕")
+        try:
+            await msg.reply_text(text)
+        except Exception as e:
+            logger.error(f"Fallback reply error: {e}")
 
 # ─── AI розпізнавання подій ───────────────────────────────────────────────────
 
