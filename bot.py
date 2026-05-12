@@ -1202,6 +1202,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg = update.message
         if not msg:
             return
+        logger.info(f"Група повідомлення: chat_id={msg.chat_id}, GROUP_CHAT_ID={GROUP_CHAT_ID}, text={msg.text[:30] if msg.text else None}")
         if msg.chat_id == GROUP_CHAT_ID and msg.from_user:
             track_activity(msg.from_user.id)
         # Парсинг дат з гілки анкет
