@@ -940,42 +940,69 @@ async def handle_ai_events(update: Update, context: ContextTypes.DEFAULT_TYPE):
     _last_ai_check = now
     from datetime import date as _date
     today = _date.today().isoformat()
+    buffer_snapshot = list(_msg_buffer)
+
     result = await gemini_call(
         f"Сьогодні {today}. Проаналізуй повідомлення з чату жіночої спільноти.\n"
-        f"Повідомлення:\n{chr(10).join(_msg_buffer)}\n\n"
+        f"Повідомлення:\n{chr(10).join(buffer_snapshot)}\n\n"
         f"Якщо дівчата домовляються про конкретну зустріч або подію — поверни JSON з полями: "
         f"title (назва), date (YYYY-MM-DD, точна дата якщо відома, інакше найближча згадана), "
         f"time (ЧЧ:ХХ або null), location (місце або null), price (число або null), description.\n"
         f"Якщо це просте обговорення без конкретної дати і місця — поверни null.\n"
         f"Відповідь тільки JSON або null.", 200
     )
-    if not result or result.strip().lower() == "null":
+
+    event = None
+    if result and result.strip().lower() != "null":
+        try:
+            cleaned = result.replace("```json", "").replace("```", "").strip()
+            event = json.loads(cleaned)
+        except Exception:
+            pass
+
+    if event:
+        # Gemini розпізнав подію — відправляємо структуровано
+        price_str = f"{event.get('price')} грн" if event.get("price") else "безкоштовно"
+        text = (
+            f"Схоже дівчата домовились:\n\n"
+            f"Назва: {event.get('title', '')}\n"
+            f"Дата: {event.get('date', '')}\n"
+            f"Час: {event.get('time', '') or '—'}\n"
+            f"Місце: {event.get('location', '') or '—'}\n"
+            f"Вартість: {price_str}\n\nДодати подію?"
+        )
+        buttons = [[
+            InlineKeyboardButton("Додати", callback_data="ai_add"),
+            InlineKeyboardButton("Редагувати", callback_data="ai_edit"),
+            InlineKeyboardButton("Скасувати", callback_data="ai_skip"),
+        ]]
+    elif immediate:
+        # Gemini недоступний, але був прямий тригер — відправляємо сирий буфер
+        logger.warning("Gemini недоступний — надсилаємо адміну сирий буфер (immediate trigger)")
+        raw = "\n".join(buffer_snapshot[-10:])
+        text = (
+            f"⚠️ Gemini недоступний — ось повідомлення з групи:\n\n"
+            f"{raw}\n\n"
+            f"Схоже є домовленість про зустріч. Додати подію вручну?"
+        )
+        buttons = [[
+            InlineKeyboardButton("Додати вручну", callback_data="ai_edit"),
+            InlineKeyboardButton("Скасувати", callback_data="ai_skip"),
+        ]]
+    else:
+        # Gemini вернув null або недоступний без прямого тригера — нічого не робимо
         return
-    try:
-        result = result.replace("```json", "").replace("```", "").strip()
-        event = json.loads(result)
-    except Exception:
-        return
-    price_str = f"{event.get('price')} грн" if event.get("price") else "безкоштовно"
-    text = (
-        f"Схоже дівчата домовились:\n\n"
-        f"Назва: {event.get('title','')}\nДата: {event.get('date','')}\n"
-        f"Час: {event.get('time','')}\nМісце: {event.get('location','')}\n"
-        f"Вартість: {price_str}\n\nДодати подію?"
-    )
+
     for admin_id in ADMIN_IDS:
         try:
             await context.bot.send_message(
                 admin_id, text,
-                reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("Додати", callback_data="ai_add"),
-                     InlineKeyboardButton("Редагувати", callback_data="ai_edit"),
-                     InlineKeyboardButton("Скасувати", callback_data="ai_skip")]
-                ])
+                reply_markup=InlineKeyboardMarkup(buttons)
             )
-            context.bot_data[f"ai_event_{admin_id}"] = event
-        except Exception:
-            pass
+            if event:
+                context.bot_data[f"ai_event_{admin_id}"] = event
+        except Exception as e:
+            logger.error(f"Помилка відправки адміну {admin_id}: {e}")
     _msg_buffer.clear()
 
 # ─── Нова учасниця ────────────────────────────────────────────────────────────
