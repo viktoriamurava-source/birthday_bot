@@ -321,12 +321,19 @@ async def gemini_personal(member: dict, events: list, buddy: Optional[dict]) -> 
         f"{buddy_str}\nСтиль: тепло, особисто. До 100 слів.", 200
     )
 
-async def gemini_reply(question: str) -> str:
+async def gemini_reply(question: str, topic: str = "") -> str:
+    topic_context = {
+        "підписка": "Дівчина питає про оплату або поновлення підписки. Поясни що треба перейти за посиланням WayForPay і обрати план. НЕ згадуй /start.",
+        "бот": "Дівчина питає про бота. Поясни що треба написати /start боту в особисті (не в групі). Можна згадати що там є меню з усіма функціями.",
+        "нова пошта": "Дівчина шукає адресу для відправки подарунку. Поясни що адреса є в профілі учасниці в боті через кнопку Знайти учасницю. НЕ згадуй /start.",
+        "події": "Дівчата обговорюють подію або зустріч. Відповідай як учасниця спільноти — запитай коли домовились або запропонуй додати подію в бот. НЕ вставляй /start і не рекламуй бота.",
+        "день народження": "Питання про подарунок або збір на ДН. Поясни що збори відбуваються автоматично через бота, вішліст іменинниці є в особистому повідомленні. НЕ згадуй /start.",
+    }
+    ctx = topic_context.get(topic, "Відповідай ситуативно і тепло.")
     return await gemini_call(
-        f"Ти — бот Комуни Жіноцтва. Відповідай коротко і тепло.\n"
-        f"Факти: підписка через WayForPay (3 плани), активувати бота — /start в особисті, "
-        f"події і вішліст — в меню бота, збори на ДН — автоматично.\n"
-        f"Питання: {question}\nВідповідь до 80 слів.", 150
+        f"Ти — учасниця і помічниця жіночої спільноти Комуна Жіноцтва. {ctx}\n\n"
+        f"Повідомлення з чату: {question}\n\n"
+        f"Відповідь: тепло, коротко, ситуативно. До 60 слів. Не починай з 'Привіт'.", 150
     )
 
 # ─── Надсилання в групу ───────────────────────────────────────────────────────
@@ -361,6 +368,13 @@ async def show_menu(target, context, member: dict):
     sub = member.get("subscription_until")
     sub_text = f"Підписка до {date.fromisoformat(sub).strftime('%d.%m.%Y')}" if sub and sub >= date.today().isoformat() else "Підписка не активна"
     text = f"Привіт, {member['name']}!\n\n{sub_text}\n\nЩо хочеш зробити?"
+    # Визначаємо чи адмін
+    is_admin = member.get("telegram_id") in ADMIN_IDS
+
+    admin_rows = [
+        [InlineKeyboardButton("Адмін-панель", callback_data="admin_panel")],
+    ] if is_admin else []
+
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton("Моя анкета", callback_data="profile"),
          InlineKeyboardButton("Вішліст", callback_data="wishlist")],
@@ -370,6 +384,7 @@ async def show_menu(target, context, member: dict):
          InlineKeyboardButton("Мої оплати ДН", callback_data="bday_status")],
         [InlineKeyboardButton("Instagram комуни", url=INSTAGRAM_COMMUNITY),
          InlineKeyboardButton("Instagram засновниці", url=INSTAGRAM_FOUNDER)],
+        *admin_rows,
     ])
     if hasattr(target, "edit_message_text"):
         try:
@@ -861,7 +876,7 @@ async def handle_auto_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     _last_auto_reply[matched] = now
 
-    reply = await gemini_reply(msg.text)
+    reply = await gemini_reply(msg.text, topic=matched)
     logger.info(f"Gemini відповідь: {reply[:50] if reply else 'порожньо'}")
     if reply:
         try:
@@ -903,11 +918,16 @@ async def handle_ai_events(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not any(kw in " ".join(_msg_buffer).lower() for kw in keywords):
         return
     _last_ai_check = now
+    from datetime import date as _date
+    today = _date.today().isoformat()
     result = await gemini_call(
-        f"Повідомлення з чату:\n{chr(10).join(_msg_buffer)}\n\n"
-        f"Якщо домовляються про зустріч — поверни JSON: "
-        f'title, date (YYYY-MM-DD), time, location, price, description. '
-        f"Якщо ні — null.", 200
+        f"Сьогодні {today}. Проаналізуй повідомлення з чату жіночої спільноти.\n"
+        f"Повідомлення:\n{chr(10).join(_msg_buffer)}\n\n"
+        f"Якщо дівчата домовляються про конкретну зустріч або подію — поверни JSON з полями: "
+        f"title (назва), date (YYYY-MM-DD, точна дата якщо відома, інакше найближча згадана), "
+        f"time (ЧЧ:ХХ або null), location (місце або null), price (число або null), description.\n"
+        f"Якщо це просте обговорення без конкретної дати і місця — поверни null.\n"
+        f"Відповідь тільки JSON або null.", 200
     )
     if not result or result.strip().lower() == "null":
         return
@@ -927,10 +947,11 @@ async def handle_ai_events(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             await context.bot.send_message(
                 admin_id, text,
-                reply_markup=InlineKeyboardMarkup([[
-                    InlineKeyboardButton("Додати", callback_data="ai_add"),
-                    InlineKeyboardButton("Скасувати", callback_data="ai_skip")
-                ]])
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("Додати", callback_data="ai_add"),
+                     InlineKeyboardButton("Редагувати", callback_data="ai_edit"),
+                     InlineKeyboardButton("Скасувати", callback_data="ai_skip")]
+                ])
             )
             context.bot_data[f"ai_event_{admin_id}"] = event
         except Exception:
@@ -1206,9 +1227,49 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             conn.close()
         await query.edit_message_text("Подію додано!")
 
+    elif data == "ai_edit":
+        event = context.bot_data.get(f"ai_event_{user_id}", {})
+        context.user_data["new_event"] = {
+            "title": event.get("title", ""),
+            "event_date": event.get("date", date.today().isoformat()),
+            "event_time": event.get("time", ""),
+            "location": event.get("location", ""),
+            "description": event.get("description", ""),
+            "price": event.get("price") or 0,
+            "is_paid": 1 if event.get("price") else 0,
+            "max_spots": 0, "spots_left": 0, "wfp_link": "",
+        }
+        context.user_data["waiting_for"] = "admin_event_title"
+        title = event.get("title", "")
+        await query.edit_message_text(
+            f"Редагуємо подію. Поточна назва: {title}\n\nВведи нову назву (або - щоб залишити):"
+        )
+
     elif data == "ai_skip":
         context.bot_data.pop(f"ai_event_{user_id}", None)
         await query.edit_message_text("Скасовано")
+
+    elif data == "admin_panel":
+        await query.edit_message_text(
+            "Адмін-панель:\n\n"
+            "/members — список учасниць\n"
+            "/birthdays — дні народження\n"
+            "/eventstatus — статус збору ДН\n"
+            "/remind — нагадати боржницям\n"
+            "/forcebday Ім'я — запустити збір\n"
+            "/setbirthday Ім'я ДД.ММ\n"
+            "/setusername Ім'я @нік\n"
+            "/setsub @нік РРРР-ММ-ДД\n"
+            "/renewsub @нік 3\n"
+            "/subexpiring — закінчуються за 7 днів\n"
+            "/subexpired — прострочені\n"
+            "/importsubs — імпорт підписок\n"
+            "/bycity Місто\n"
+            "/addevent — додати подію\n"
+            "/testcheck — тест\n"
+            "/clearlog — очистити журнал",
+            reply_markup=InlineKeyboardMarkup([[back_btn(), menu_btn()]])
+        )
 
     elif data.startswith("admin_kick_"):
         mid = int(data.split("_")[2])
