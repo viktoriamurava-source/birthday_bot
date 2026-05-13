@@ -903,20 +903,40 @@ async def handle_auto_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
 _msg_buffer: list = []
 _last_ai_check: datetime = datetime.now() - timedelta(minutes=10)
 
+# Слова що одразу тригерять — одне повідомлення достатньо
+_IMMEDIATE_TRIGGERS = [
+    "зустрінемось", "зустрітись", "зустрітися", "зберемось", "зібратись",
+    "зібратися", "приходьте", "прийдіть", "запрошую всіх", "зустріч о ",
+    "зустріч в ", "де зустрічаємось", "де збираємось", "може зустрінемось",
+    "давайте зустрінемось", "пропоную зустрітись",
+]
+
 async def handle_ai_events(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global _last_ai_check
     msg = update.message
     if not msg or not msg.text or msg.chat_id != GROUP_CHAT_ID:
         return
+
+    text_lower = msg.text.lower()
+    immediate = any(kw in text_lower for kw in _IMMEDIATE_TRIGGERS)
+
     _msg_buffer.append(f"{msg.from_user.first_name}: {msg.text}")
     if len(_msg_buffer) > 20:
         _msg_buffer.pop(0)
+
     now = datetime.now()
-    if (now - _last_ai_check).seconds < 300:
-        return
-    keywords = ["зустрінемось", "зустріч", "зібратись", "прийдіть", "захід", "о котрій", "де зустрічаємось"]
-    if not any(kw in " ".join(_msg_buffer).lower() for kw in keywords):
-        return
+
+    if not immediate:
+        # Без прямого тригера — перевіряємо cooldown і буфер
+        if (now - _last_ai_check).seconds < 300:
+            return
+        general = ["захід", "о котрій", "де зустрічаємось", "зустріч"]
+        if not any(kw in " ".join(_msg_buffer).lower() for kw in general):
+            return
+    else:
+        # Прямий тригер — ігноруємо cooldown
+        logger.info(f"AI event immediate trigger: {msg.text[:50]}")
+
     _last_ai_check = now
     from datetime import date as _date
     today = _date.today().isoformat()
@@ -1266,9 +1286,59 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "/importsubs — імпорт підписок\n"
             "/bycity Місто\n"
             "/addevent — додати подію\n"
+        "/editevent — редагувати подію\n"
             "/testcheck — тест\n"
             "/clearlog — очистити журнал",
             reply_markup=InlineKeyboardMarkup([[back_btn(), menu_btn()]])
+        )
+
+    elif data.startswith("admin_edit_event_"):
+        event_id = int(data.split("_")[3])
+        conn = get_conn()
+        ev = conn.execute("SELECT * FROM events WHERE id=?", (event_id,)).fetchone()
+        conn.close()
+        if not ev:
+            await query.edit_message_text("Подію не знайдено")
+            return
+        ev = dict(ev)
+        paid_str = f"Платна — {ev['price']} грн" if ev["is_paid"] else "Безкоштовна"
+        ev_title = ev['title']
+        ev_date = ev['event_date']
+        ev_time = ev.get('event_time', '')
+        ev_loc = ev.get('location', '')
+        await query.edit_message_text(
+            f"Подія: {ev_title}\nДата: {ev_date} {ev_time}\nМісце: {ev_loc}\n{paid_str}\n\nЩо редагуємо?",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("Назва", callback_data=f"aef_title_{event_id}"),
+                 InlineKeyboardButton("Дата", callback_data=f"aef_date_{event_id}")],
+                [InlineKeyboardButton("Час", callback_data=f"aef_time_{event_id}"),
+                 InlineKeyboardButton("Місце", callback_data=f"aef_location_{event_id}")],
+                [InlineKeyboardButton("Опис", callback_data=f"aef_description_{event_id}"),
+                 InlineKeyboardButton("Ціна", callback_data=f"aef_price_{event_id}")],
+                [InlineKeyboardButton("Деактивувати подію", callback_data=f"aef_deactivate_{event_id}")],
+                [back_btn("Назад", "menu")],
+            ])
+        )
+
+    elif data.startswith("aef_"):
+        parts = data.split("_")
+        field = parts[1]
+        event_id = int(parts[2])
+        if field == "deactivate":
+            conn = get_conn()
+            conn.execute("UPDATE events SET is_active=0 WHERE id=?", (event_id,))
+            conn.commit()
+            conn.close()
+            await query.edit_message_text("Подію деактивовано")
+            return
+        field_names = {
+            "title": "назву", "date": "дату (РРРР-ММ-ДД)",
+            "time": "час (ЧЧ:ХХ)", "location": "місце",
+            "description": "опис", "price": "ціну (грн, або 0 для безкоштовної)",
+        }
+        context.user_data["waiting_for"] = f"admin_edit_field_{field}_{event_id}"
+        await query.edit_message_text(
+            f"Введи нову {field_names.get(field, field)}:"
         )
 
     elif data.startswith("admin_kick_"):
@@ -1840,6 +1910,30 @@ async def cmd_add_event(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["new_event"] = {}
     await update.message.reply_text("Введи назву події:")
 
+async def cmd_edit_event(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/editevent — редагувати існуючу подію."""
+    if update.effective_user.id not in ADMIN_IDS:
+        return
+    conn = get_conn()
+    events = conn.execute(
+        "SELECT * FROM events WHERE is_active=1 ORDER BY event_date LIMIT 10"
+    ).fetchall()
+    conn.close()
+    if not events:
+        await update.message.reply_text("Активних подій немає")
+        return
+    buttons = []
+    for ev in events:
+        buttons.append([InlineKeyboardButton(
+            f"{ev['title']} — {ev['event_date']}",
+            callback_data=f"admin_edit_event_{ev['id']}"
+        )])
+    await update.message.reply_text(
+        "Обери подію для редагування:",
+        reply_markup=InlineKeyboardMarkup(buttons)
+    )
+
+
 async def cmd_test_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id not in ADMIN_IDS:
         return
@@ -1940,6 +2034,44 @@ async def handle_admin_input(update: Update, context: ContextTypes.DEFAULT_TYPE,
         context.user_data["new_event"]["wfp_link"] = "" if text == "-" else text
         await _save_event(update, context)
 
+    elif waiting and waiting.startswith("admin_edit_field_"):
+        parts = waiting.split("_")
+        field = parts[3]
+        event_id = int(parts[4])
+        conn = get_conn()
+        if field == "price":
+            price = int(text) if text.isdigit() else 0
+            is_paid = 1 if price > 0 else 0
+            conn.execute("UPDATE events SET price=?, is_paid=? WHERE id=?", (price, is_paid, event_id))
+        elif field == "date":
+            conn.execute("UPDATE events SET event_date=? WHERE id=?", (text, event_id))
+        elif field == "time":
+            conn.execute("UPDATE events SET event_time=? WHERE id=?", ("" if text == "-" else text, event_id))
+        elif field == "location":
+            conn.execute("UPDATE events SET location=? WHERE id=?", ("" if text == "-" else text, event_id))
+        elif field == "description":
+            conn.execute("UPDATE events SET description=? WHERE id=?", ("" if text == "-" else text, event_id))
+        elif field == "title":
+            conn.execute("UPDATE events SET title=? WHERE id=?", (text, event_id))
+        conn.commit()
+        ev = conn.execute("SELECT * FROM events WHERE id=?", (event_id,)).fetchone()
+        conn.close()
+        context.user_data["waiting_for"] = None
+        if ev:
+            ev = dict(ev)
+            paid_str = f"Платна — {ev['price']} грн" if ev["is_paid"] else "Безкоштовна"
+            t = ev['title']
+            d = ev['event_date']
+            tm = ev.get('event_time', '')
+            loc = ev.get('location', '')
+            await update.message.reply_text(
+                f"Оновлено!\n\n{t}\n{d} {tm}\n{loc}\n{paid_str}",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("Редагувати ще", callback_data=f"admin_edit_event_{event_id}"),
+                    menu_btn()
+                ]])
+            )
+
 async def _save_event(target, context: ContextTypes.DEFAULT_TYPE):
     ev = context.user_data.pop("new_event", {})
     context.user_data["waiting_for"] = None
@@ -1983,6 +2115,7 @@ def main():
     app.add_handler(CommandHandler("importsubs",  cmd_import_subs))
     app.add_handler(CommandHandler("bycity",      cmd_by_city))
     app.add_handler(CommandHandler("addevent",    cmd_add_event))
+    app.add_handler(CommandHandler("editevent",   cmd_edit_event))
     app.add_handler(CommandHandler("testcheck",   cmd_test_check))
     app.add_handler(CommandHandler("clearlog",    cmd_clear_log))
 
