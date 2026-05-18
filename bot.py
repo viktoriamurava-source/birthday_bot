@@ -914,30 +914,40 @@ _IMMEDIATE_TRIGGERS = [
 async def handle_ai_events(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global _last_ai_check
     msg = update.message
-    if not msg or not msg.text or msg.chat_id != GROUP_CHAT_ID:
+    if not msg or msg.chat_id != GROUP_CHAT_ID:
+        return
+    if GROUP_THREAD_ID and msg.message_thread_id != GROUP_THREAD_ID:
         return
 
-    text_lower = msg.text.lower()
-    immediate = any(kw in text_lower for kw in _IMMEDIATE_TRIGGERS)
+    # Текст з пересланого або звичайного
+    is_forward = bool(msg.forward_origin or msg.forward_from or msg.forward_from_chat)
+    text = msg.text or msg.caption or ""
+    if not text:
+        return
 
-    _msg_buffer.append(f"{msg.from_user.first_name}: {msg.text}")
+    text_lower = text.lower()
+    event_hints = ["місце", "адрес", "вул.", "вулиц", "о ", "вхід", "реєстрац", "запис", "участь", "грн", "безкоштовно"]
+    if is_forward and any(kw in text_lower for kw in event_hints):
+        immediate = True
+        logger.info(f"AI event: пересилане з ознаками події")
+    else:
+        immediate = any(kw in text_lower for kw in _IMMEDIATE_TRIGGERS)
+
+    sender = msg.from_user.first_name if msg.from_user else "Невідома"
+    _msg_buffer.append(f"{sender}: {text}")
     if len(_msg_buffer) > 20:
         _msg_buffer.pop(0)
 
     now = datetime.now()
 
     if not immediate:
-        # Без прямого тригера — перевіряємо cooldown і буфер
         if (now - _last_ai_check).seconds < 300:
             return
         general = ["захід", "о котрій", "де зустрічаємось", "зустріч"]
         if not any(kw in " ".join(_msg_buffer).lower() for kw in general):
             return
     else:
-        # Прямий тригер — ігноруємо cooldown
-        logger.info(f"AI event immediate trigger: {msg.text[:50]}")
-
-    _last_ai_check = now
+        logger.info(f"AI event immediate trigger: {text[:50]}")
     from datetime import date as _date
     today = _date.today().isoformat()
     result = await gemini_call(
@@ -1269,6 +1279,90 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.bot_data.pop(f"ai_event_{user_id}", None)
         await query.edit_message_text("Скасовано")
 
+
+    elif data.startswith("adm_evmembers_"):
+        event_id = int(data.split("_")[2])
+        conn = get_conn()
+        ev = conn.execute("SELECT * FROM events WHERE id=?", (event_id,)).fetchone()
+        regs = conn.execute("""
+            SELECT er.id as reg_id, m.name, m.username
+            FROM event_registrations er
+            JOIN members m ON er.member_id = m.id
+            WHERE er.event_id = ?
+            ORDER BY m.name
+        """, (event_id,)).fetchall()
+        conn.close()
+        if not ev:
+            await query.edit_message_text("Подію не знайдено.")
+            return
+        if not regs:
+            await query.edit_message_text(f"На подію «{ev['title']}» ніхто не записаний.")
+            return
+        lines = [f"📋 Записані на «{ev['title']}» ({len(regs)}):"]
+        for r in regs:
+            uname = f" @{r['username']}" if r['username'] else ""
+            lines.append(f"• {r['name']}{uname}")
+        buttons = []
+        for r in regs:
+            uname = f"@{r['username']}" if r['username'] else r['name']
+            buttons.append([InlineKeyboardButton(
+                f"❌ {r['name']}", callback_data=f"adm_evrm_{r['reg_id']}_{event_id}"
+            )])
+        buttons.append([InlineKeyboardButton("◀️ Назад", callback_data="admin_panel")])
+        await query.edit_message_text(
+            "\n".join(lines) + "\n\nНатисни ❌ щоб видалити учасницю зі списку:",
+            reply_markup=InlineKeyboardMarkup(buttons)
+        )
+
+    elif data.startswith("adm_evrm_"):
+        parts = data.split("_")
+        reg_id = int(parts[2])
+        event_id = int(parts[3])
+        conn = get_conn()
+        reg = conn.execute(
+            "SELECT er.id, m.name FROM event_registrations er JOIN members m ON er.member_id=m.id WHERE er.id=?",
+            (reg_id,)
+        ).fetchone()
+        if reg:
+            conn.execute("DELETE FROM event_registrations WHERE id=?", (reg_id,))
+            conn.commit()
+            name = reg['name']
+        conn.close()
+        if reg:
+            await query.answer(f"✅ {name} видалена зі списку")
+            # Оновлюємо список
+            fake_data = f"adm_evmembers_{event_id}"
+            # Перезавантажуємо список
+            conn2 = get_conn()
+            ev = conn2.execute("SELECT * FROM events WHERE id=?", (event_id,)).fetchone()
+            regs = conn2.execute("""
+                SELECT er.id as reg_id, m.name, m.username
+                FROM event_registrations er
+                JOIN members m ON er.member_id = m.id
+                WHERE er.event_id = ?
+                ORDER BY m.name
+            """, (event_id,)).fetchall()
+            conn2.close()
+            if not regs:
+                await query.edit_message_text(f"На подію «{ev['title']}» більше нікого немає.")
+                return
+            lines = [f"📋 Записані на «{ev['title']}» ({len(regs)}):"]
+            for r in regs:
+                uname = f" @{r['username']}" if r['username'] else ""
+                lines.append(f"• {r['name']}{uname}")
+            buttons = []
+            for r in regs:
+                buttons.append([InlineKeyboardButton(
+                    f"❌ {r['name']}", callback_data=f"adm_evrm_{r['reg_id']}_{event_id}"
+                )])
+            buttons.append([InlineKeyboardButton("◀️ Назад", callback_data="admin_panel")])
+            await query.edit_message_text(
+                "\n".join(lines) + "\n\nНатисни ❌ щоб видалити учасницю зі списку:",
+                reply_markup=InlineKeyboardMarkup(buttons)
+            )
+        else:
+            await query.answer("Запис не знайдено")
+
     elif data == "admin_panel":
         await query.edit_message_text(
             "Адмін-панель:\n\n"
@@ -1402,6 +1496,13 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if GEMINI_API_KEY and msg.chat_id == GROUP_CHAT_ID:
             await handle_auto_reply(update, context)
             await handle_ai_events(update, context)
+        return
+
+    # Пересилані повідомлення в групі (без тексту як text-message)
+    if update.effective_chat and update.effective_chat.type in ("group", "supergroup"):
+        if msg and (msg.forward_origin or msg.forward_from or msg.forward_from_chat):
+            if GEMINI_API_KEY and msg.chat_id == GROUP_CHAT_ID:
+                await handle_ai_events(update, context)
         return
 
     # Приватні
@@ -1593,6 +1694,36 @@ async def cmd_birthdays(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 tag = ""
             lines.append(f"  {d:02d}.{mo:02d} — {name}{tag}")
     await update.message.reply_text("\n".join(lines))
+
+
+async def cmd_event_members(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Адмін: список записаних на подію з можливістю видалення."""
+    if update.effective_user.id not in ADMIN_IDS:
+        return
+    conn = get_conn()
+    # Беремо майбутні або поточні події
+    events = conn.execute("""
+        SELECT e.id, e.title, e.event_date,
+               COUNT(er.id) as reg_count
+        FROM events e
+        LEFT JOIN event_registrations er ON er.event_id = e.id
+        WHERE e.event_date >= date('now', '-1 day')
+        GROUP BY e.id
+        ORDER BY e.event_date ASC
+        LIMIT 10
+    """).fetchall()
+    conn.close()
+    if not events:
+        await update.message.reply_text("Активних подій немає.")
+        return
+    buttons = []
+    for ev in events:
+        label = f"{ev['title']} ({ev['event_date']}) — {ev['reg_count']} записаних"
+        buttons.append([InlineKeyboardButton(label, callback_data=f"adm_evmembers_{ev['id']}")])
+    await update.message.reply_text(
+        "Оберіть подію:",
+        reply_markup=InlineKeyboardMarkup(buttons)
+    )
 
 async def cmd_event_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id not in ADMIN_IDS:
@@ -1882,57 +2013,6 @@ async def cmd_import_subs(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Надішли список:\n@username — РРРР-ММ-ДД\n\nНаприклад:\n@kateryna — 2026-06-01")
     context.user_data["waiting_for"] = "admin_import_subs"
 
-
-async def cmd_import_csv(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Адмін надсилає members.csv — бот додає всіх нових учасниць без підписки."""
-    if update.effective_user.id not in ADMIN_IDS:
-        return
-    if not update.message.document:
-        await update.message.reply_text("Надішли файл members.csv як документ.")
-        return
-    doc = update.message.document
-    if not doc.file_name.endswith(".csv"):
-        await update.message.reply_text("Потрібен файл .csv")
-        return
-    file = await context.bot.get_file(doc.file_id)
-    import io
-    buf = io.BytesIO()
-    await file.download_to_memory(buf)
-    buf.seek(0)
-    import csv as _csv
-    text = buf.read().decode("utf-8")
-    reader = _csv.DictReader(io.StringIO(text))
-    conn = get_conn()
-    added = 0
-    skipped = 0
-    for row in reader:
-        tg_id = int(row["id"]) if row.get("id") else None
-        username = row.get("username", "").lstrip("@").strip() or None
-        first = row.get("first_name", "").strip()
-        last = row.get("last_name", "").strip()
-        name = f"{first} {last}".strip() or first or username or str(tg_id)
-        phone = row.get("phone", "").strip() or None
-        if phone and not phone.startswith("+"):
-            phone = "+" + phone
-        # Перевіряємо чи вже є в базі
-        existing = conn.execute(
-            "SELECT id FROM members WHERE telegram_id=? OR (username IS NOT NULL AND LOWER(username)=LOWER(?))",
-            (tg_id, username or "")
-        ).fetchone()
-        if existing:
-            skipped += 1
-            continue
-        conn.execute(
-            "INSERT INTO members (telegram_id, username, name, phone, is_active) VALUES (?,?,?,?,1)",
-            (tg_id, username, name, phone)
-        )
-        added += 1
-    conn.commit()
-    conn.close()
-    await update.message.reply_text(
-        f"Імпорт завершено!\n\n\u2705 Додано нових: {added}\n\u23ed Вже були в базі: {skipped}\n\nТепер /subexpired покаже всіх без підписки."
-    )
-
 async def cmd_by_city(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id not in ADMIN_IDS:
         return
@@ -2164,8 +2244,7 @@ def main():
     app.add_handler(CommandHandler("subexpiring", cmd_sub_expiring))
     app.add_handler(CommandHandler("subexpired",  cmd_sub_expired))
     app.add_handler(CommandHandler("importsubs",  cmd_import_subs))
-    app.add_handler(CommandHandler("importcsv",   cmd_import_csv))
-    app.add_handler(MessageHandler(filters.Document.ALL & filters.ChatType.PRIVATE, cmd_import_csv))
+    app.add_handler(CommandHandler("eventmembers", cmd_event_members))
     app.add_handler(CommandHandler("bycity",      cmd_by_city))
     app.add_handler(CommandHandler("addevent",    cmd_add_event))
     app.add_handler(CommandHandler("editevent",   cmd_edit_event))
@@ -2174,6 +2253,7 @@ def main():
 
     app.add_handler(CallbackQueryHandler(handle_callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+    app.add_handler(MessageHandler(filters.FORWARDED & ~filters.COMMAND, handle_text))
     app.add_handler(ChatMemberHandler(handle_new_member, ChatMemberHandler.CHAT_MEMBER))
 
     app.job_queue.run_daily(daily_check, time=dtime(hour=CHECK_HOUR_UTC, minute=0), name="daily_check")
