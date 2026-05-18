@@ -5,10 +5,6 @@ Community Bot v2 — повний рефакторинг
 """
 
 import logging
-import hmac
-import hashlib
-import asyncio
-from aiohttp import web
 import sqlite3
 import re
 import os
@@ -16,7 +12,7 @@ import json
 from datetime import datetime, date, time as dtime, timedelta
 from typing import Optional
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup
 from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler,
     MessageHandler, ChatMemberHandler, filters, ContextTypes,
@@ -36,13 +32,13 @@ INVITE_LINK         = os.getenv("INVITE_LINK", "https://t.me/+YOUR")
 INSTAGRAM_COMMUNITY = os.getenv("INSTAGRAM_COMMUNITY", "https://www.instagram.com/your_community/")
 INSTAGRAM_FOUNDER   = os.getenv("INSTAGRAM_FOUNDER", "https://www.instagram.com/vmuravska/")
 FORWARD_CHANNEL_ID  = int(os.getenv("FORWARD_CHANNEL_ID", "0"))
-WFP_URL_30D         = os.getenv("WFP_URL_30D",  "https://secure.wayforpay.com/payment/sed085c8f9a43")
-WFP_URL_90D         = os.getenv("WFP_URL_90D",  "https://secure.wayforpay.com/payment/s528da72c2353")
-WFP_URL_180D        = os.getenv("WFP_URL_180D", "https://secure.wayforpay.com/payment/s600527299905")
+WFP_SUB_URL         = os.getenv("WFP_SUB_URL", "https://secure.wayforpay.com/sub/womenscommune")
+WFP_PRODUCT_3M      = os.getenv("WFP_PRODUCT_3M", "Легкий старт")
+WFP_PRODUCT_6M      = os.getenv("WFP_PRODUCT_6M", "Впевнена стабільність")
+WFP_PRODUCT_1Y      = os.getenv("WFP_PRODUCT_1Y", "Тотальна довіра")
 WFP_MERCHANT        = os.getenv("WFP_MERCHANT_ACCOUNT", "")
 WFP_SECRET          = os.getenv("WFP_SECRET_KEY", "")
-WFP_DOMAIN          = os.getenv("WFP_DOMAIN", "spectacular-warmth.up.railway.app")
-WFP_WEBHOOK_PORT    = int(os.getenv("PORT", "8080"))
+WFP_DOMAIN          = os.getenv("WFP_DOMAIN", "your-domain.railway.app")
 GEMINI_API_KEY      = os.getenv("GEMINI_API_KEY", "")
 GEMINI_MODEL        = os.getenv("GEMINI_MODEL", "gemini-pro")
 
@@ -1038,19 +1034,29 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if data == "subscribe":
-        # Перевіряємо чи є телефон — якщо ні, спочатку запитуємо
-        if member and not member.get("phone"):
-            from telegram import KeyboardButton, ReplyKeyboardMarkup as RKM, ReplyKeyboardRemove
-            context.user_data["after_phone"] = "subscribe"
-            await query.message.reply_text(
-                "Одне уточнення — поділись своїм номером телефону, аби ми знали про твою оплату 🌸",
-                reply_markup=RKM(
-                    [[KeyboardButton("📱 Поділитись номером", request_contact=True)]],
-                    one_time_keyboard=True, resize_keyboard=True
+        await query.edit_message_text(
+            "Натисни кнопку щоб обрати план і оплатити.\n\nПісля оплати підписка активується автоматично.",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("Хочу приєднатись", url=WFP_SUB_URL)],
+                [InlineKeyboardButton("Я оплатила", callback_data=f"sub_paid_{member['id']}" if member else "menu")],
+                [back_btn()],
+            ])
+        )
+        return
+
+    if data.startswith("sub_paid_"):
+        mid = int(data.split("_")[2])
+        m = get_member_by_id(mid)
+        for admin_id in ADMIN_IDS:
+            try:
+                await context.bot.send_message(
+                    admin_id,
+                    f"Оплата підписки:\n{m['name'] if m else mid} {m.get('username','') if m else ''}\n"
+                    f"Якщо не активувалась — /renewsub {m.get('username', m['name']) if m else mid} 3"
                 )
-            )
-            return
-        await _show_tariffs(query)
+            except Exception:
+                pass
+        await query.edit_message_text("Дякуємо! Якщо оплата пройшла — підписку активовано автоматично.\nЯкщо ні — напиши адміну.")
         return
 
     if data == "subscription":
@@ -1876,6 +1882,57 @@ async def cmd_import_subs(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Надішли список:\n@username — РРРР-ММ-ДД\n\nНаприклад:\n@kateryna — 2026-06-01")
     context.user_data["waiting_for"] = "admin_import_subs"
 
+
+async def cmd_import_csv(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Адмін надсилає members.csv — бот додає всіх нових учасниць без підписки."""
+    if update.effective_user.id not in ADMIN_IDS:
+        return
+    if not update.message.document:
+        await update.message.reply_text("Надішли файл members.csv як документ.")
+        return
+    doc = update.message.document
+    if not doc.file_name.endswith(".csv"):
+        await update.message.reply_text("Потрібен файл .csv")
+        return
+    file = await context.bot.get_file(doc.file_id)
+    import io
+    buf = io.BytesIO()
+    await file.download_to_memory(buf)
+    buf.seek(0)
+    import csv as _csv
+    text = buf.read().decode("utf-8")
+    reader = _csv.DictReader(io.StringIO(text))
+    conn = get_conn()
+    added = 0
+    skipped = 0
+    for row in reader:
+        tg_id = int(row["id"]) if row.get("id") else None
+        username = row.get("username", "").lstrip("@").strip() or None
+        first = row.get("first_name", "").strip()
+        last = row.get("last_name", "").strip()
+        name = f"{first} {last}".strip() or first or username or str(tg_id)
+        phone = row.get("phone", "").strip() or None
+        if phone and not phone.startswith("+"):
+            phone = "+" + phone
+        # Перевіряємо чи вже є в базі
+        existing = conn.execute(
+            "SELECT id FROM members WHERE telegram_id=? OR (username IS NOT NULL AND LOWER(username)=LOWER(?))",
+            (tg_id, username or "")
+        ).fetchone()
+        if existing:
+            skipped += 1
+            continue
+        conn.execute(
+            "INSERT INTO members (telegram_id, username, name, phone, is_active) VALUES (?,?,?,?,1)",
+            (tg_id, username, name, phone)
+        )
+        added += 1
+    conn.commit()
+    conn.close()
+    await update.message.reply_text(
+        f"Імпорт завершено!\n\n\u2705 Додано нових: {added}\n\u23ed Вже були в базі: {skipped}\n\nТепер /subexpired покаже всіх без підписки."
+    )
+
 async def cmd_by_city(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id not in ADMIN_IDS:
         return
@@ -2086,167 +2143,6 @@ async def _save_event(target, context: ContextTypes.DEFAULT_TYPE):
     else:
         await target.message.reply_text(result_text)
 
-
-# ─── Підписка: тарифи ─────────────────────────────────────────────────────────
-
-TARIFFS = [
-    {"label": "30 днів — 677 грн",  "days": 30,  "url": "WFP_URL_30D"},
-    {"label": "90 днів — 1699 грн", "days": 90,  "url": "WFP_URL_90D"},
-    {"label": "180 днів — 2888 грн","days": 180, "url": "WFP_URL_180D"},
-]
-
-async def _show_tariffs(target):
-    """target — query або message"""
-    urls = {"WFP_URL_30D": WFP_URL_30D, "WFP_URL_90D": WFP_URL_90D, "WFP_URL_180D": WFP_URL_180D}
-    buttons = [[InlineKeyboardButton(t["label"], url=urls[t["url"]])] for t in TARIFFS]
-    buttons.append([back_btn()])
-    text = (
-        "Оберіть тариф для оплати:\n\n"
-        "▪️ 30 днів — 677 грн\n"
-        "▪️ 90 днів — 1699 грн\n"
-        "▪️ 180 днів — 2888 грн\n\n"
-        "Після оплати підписка активується автоматично 🌸"
-    )
-    if hasattr(target, "edit_message_text"):
-        await target.edit_message_text(text, reply_markup=InlineKeyboardMarkup(buttons))
-    else:
-        await target.reply_text(text, reply_markup=InlineKeyboardMarkup(buttons))
-
-
-async def handle_contact(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обробляє шеринг контакту через нативну кнопку Telegram."""
-    contact = update.message.contact
-    if not contact:
-        return
-    user_id = update.effective_user.id
-    phone = contact.phone_number
-    # Нормалізуємо телефон
-    if not phone.startswith("+"):
-        phone = "+" + phone
-    conn = get_conn()
-    conn.execute("UPDATE members SET phone=? WHERE telegram_id=?", (phone, user_id))
-    conn.commit()
-    conn.close()
-    logger.info(f"Телефон збережено для {user_id}: {phone}")
-    await update.message.reply_text(
-        "Дякуємо! Телефон збережено 🌸",
-        reply_markup=ReplyKeyboardRemove()
-    )
-    # Якщо після шерингу мали показати тарифи — показуємо
-    if context.user_data.pop("after_phone", None) == "subscribe":
-        await _show_tariffs(update.message)
-
-
-# ─── WayForPay вебхук ─────────────────────────────────────────────────────────
-
-def _wfp_verify_signature(data: dict) -> bool:
-    """Перевіряє підпис WayForPay вебхуку."""
-    if not WFP_SECRET:
-        return True  # якщо секрет не заданий — пропускаємо перевірку
-    params = [
-        data.get("merchantAccount", ""),
-        data.get("orderReference", ""),
-        data.get("amount", ""),
-        data.get("currency", ""),
-        data.get("authCode", ""),
-        data.get("cardPan", ""),
-        data.get("transactionStatus", ""),
-        data.get("reasonCode", ""),
-    ]
-    sign_str = ";".join(str(p) for p in params)
-    expected = hmac.new(WFP_SECRET.encode(), sign_str.encode(), hashlib.md5).hexdigest()
-    return hmac.compare_digest(expected, data.get("merchantSignature", ""))
-
-
-def _days_from_order(order_ref: str) -> int:
-    """Визначає кількість днів підписки з orderReference."""
-    ref = order_ref.lower()
-    if "180" in ref:
-        return 180
-    if "90" in ref or "3m" in ref:
-        return 90
-    return 30  # default
-
-
-async def wfp_webhook_handler(request: web.Request) -> web.Response:
-    """HTTP endpoint для WayForPay вебхуків."""
-    try:
-        data = await request.json()
-    except Exception:
-        return web.Response(status=400, text="Invalid JSON")
-
-    logger.info(f"WFP webhook: {data.get('transactionStatus')} / {data.get('phone')}")
-
-    if data.get("transactionStatus") != "Approved":
-        return web.json_response({"status": "ok"})
-
-    if not _wfp_verify_signature(data):
-        logger.warning("WFP webhook: невірний підпис!")
-        return web.Response(status=403, text="Bad signature")
-
-    phone_raw = data.get("phone", "")
-    phone = phone_raw.strip()
-    if phone and not phone.startswith("+"):
-        phone = "+" + phone
-
-    order_ref = data.get("orderReference", "")
-    days = _days_from_order(order_ref)
-    until = (date.today() + timedelta(days=days)).isoformat()
-
-    conn = get_conn()
-    member = None
-    if phone:
-        row = conn.execute(
-            "SELECT * FROM members WHERE phone=? LIMIT 1", (phone,)
-        ).fetchone()
-        if row:
-            member = dict(row)
-
-    if member:
-        conn.execute(
-            "UPDATE members SET subscription_until=?, subscription_plan=?, is_active=1 WHERE id=?",
-            (until, f"{days}d", member["id"])
-        )
-        conn.commit()
-        logger.info(f"Підписку активовано: {member.get('name')} до {until}")
-    else:
-        logger.warning(f"WFP webhook: учасницю не знайдено по телефону {phone}")
-    conn.close()
-
-    # Повідомлення користувачу
-    bot = request.app["bot"]
-    plan_label = {30: "30 днів", 90: "90 днів", 180: "180 днів"}.get(days, f"{days} днів")
-
-    if member and member.get("telegram_id"):
-        try:
-            await bot.send_message(
-                member["telegram_id"],
-                f"Ти оплатила пакет доступу {plan_label}\n\n"
-                f"Сподіваємось наша подорож у неосяжний світ жіноцтва надихне тебе на зміни 🧡\n\n"
-                f"Наступний крок за тобою.\n\n"
-                f"Запрошуємо! {INVITE_LINK}"
-            )
-        except Exception as e:
-            logger.error(f"Не вдалось надіслати повідомлення користувачу: {e}")
-
-    # Повідомлення адміну
-    name_str = member.get("name", "Невідома") if member else f"тел. {phone}"
-    username_str = f" @{member['username']}" if member and member.get("username") else ""
-    for admin_id in ADMIN_IDS:
-        try:
-            await bot.send_message(
-                admin_id,
-                f"✅ Нова оплата підписки!\n\n"
-                f"👤 {name_str}{username_str}\n"
-                f"📱 {phone}\n"
-                f"📅 Тариф: {plan_label}\n"
-                f"📆 До: {date.fromisoformat(until).strftime('%d.%m.%Y')}"
-            )
-        except Exception as e:
-            logger.error(f"Не вдалось надіслати повідомлення адміну: {e}")
-
-    return web.json_response({"status": "ok"})
-
 # ─── main ─────────────────────────────────────────────────────────────────────
 
 def main():
@@ -2268,6 +2164,8 @@ def main():
     app.add_handler(CommandHandler("subexpiring", cmd_sub_expiring))
     app.add_handler(CommandHandler("subexpired",  cmd_sub_expired))
     app.add_handler(CommandHandler("importsubs",  cmd_import_subs))
+    app.add_handler(CommandHandler("importcsv",   cmd_import_csv))
+    app.add_handler(MessageHandler(filters.Document.ALL & filters.ChatType.PRIVATE, cmd_import_csv))
     app.add_handler(CommandHandler("bycity",      cmd_by_city))
     app.add_handler(CommandHandler("addevent",    cmd_add_event))
     app.add_handler(CommandHandler("editevent",   cmd_edit_event))
@@ -2275,7 +2173,6 @@ def main():
     app.add_handler(CommandHandler("clearlog",    cmd_clear_log))
 
     app.add_handler(CallbackQueryHandler(handle_callback))
-    app.add_handler(MessageHandler(filters.CONTACT, handle_contact))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_handler(ChatMemberHandler(handle_new_member, ChatMemberHandler.CHAT_MEMBER))
 
@@ -2284,29 +2181,7 @@ def main():
     app.job_queue.run_daily(job_thursday_digest, time=dtime(hour=9, minute=0), days=(3,), name="thursday_digest")
 
     logger.info("Community Bot v2 запущено!")
-
-    # Запускаємо aiohttp вебхук сервер і Telegram polling паралельно
-    async def run_all():
-        web_app = web.Application()
-        web_app["bot"] = app.bot
-        web_app.router.add_post("/wfp-webhook", wfp_webhook_handler)
-        runner = web.AppRunner(web_app)
-        await runner.setup()
-        site = web.TCPSite(runner, "0.0.0.0", WFP_WEBHOOK_PORT)
-        await site.start()
-        logger.info(f"WFP webhook сервер запущено на порту {WFP_WEBHOOK_PORT}")
-        await app.initialize()
-        await app.start()
-        await app.updater.start_polling(drop_pending_updates=True)
-        try:
-            await asyncio.Event().wait()
-        finally:
-            await app.updater.stop()
-            await app.stop()
-            await app.shutdown()
-            await runner.cleanup()
-
-    asyncio.run(run_all())
+    app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
     main()
