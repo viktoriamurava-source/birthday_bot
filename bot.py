@@ -876,9 +876,22 @@ async def handle_auto_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ],
     }
 
+    # Питальні слова — відповідаємо тільки на питання/запити
+    QUESTION_WORDS = ["як", "де", "куди", "скільки", "чи можна", "можна", "допоможіть",
+                      "підкажіть", "підкажи", "не знаю", "не розумію", "?", "хочу",
+                      "треба", "потрібно", "не можу", "не виходить", "не працює"]
+    is_question = any(qw in text for qw in QUESTION_WORDS)
+
     matched = None
     for topic, keywords in topics.items():
         if any(kw in text for kw in keywords):
+            # Для загальних слів — тільки якщо питання
+            general_words = ["підписка", "підписку", "підписки", "бот", "боту",
+                             "подія", "події", "подію", "зустріч", "захід"]
+            kw_matched = [kw for kw in keywords if kw in text]
+            is_general = all(kw in general_words for kw in kw_matched)
+            if is_general and not is_question:
+                continue  # просте згадування — ігноруємо
             matched = topic
             break
 
@@ -945,11 +958,18 @@ async def handle_ai_events(update: Update, context: ContextTypes.DEFAULT_TYPE):
     now = datetime.now()
 
     if not immediate:
-        # Без прямого тригера — перевіряємо cooldown і буфер
+        # Без прямого тригера — потрібні конкретні ознаки події
         if (now - _last_ai_check).seconds < 300:
             return
-        general = ["захід", "о котрій", "де зустрічаємось", "зустріч"]
-        if not any(kw in " ".join(_msg_buffer).lower() for kw in general):
+        buf_text = " ".join(_msg_buffer).lower()
+        # Потрібна дата/час + місце/адреса — не просто обговорення
+        has_time = any(kw in buf_text for kw in ["о ", "о годині", ":00", ":30", "вранці", "ввечері", "вдень"])
+        has_place = any(kw in buf_text for kw in ["вул.", "вулиц", "адрес", "місце", "zoom", "meet", "http", "кафе", "парк", "центр"])
+        has_date = any(kw in buf_text for kw in ["понеділок", "вівторок", "середа", "четвер", "п'ятниця", "субота", "неділя",
+                                                   "січня", "лютого", "березня", "квітня", "травня", "червня",
+                                                   "липня", "серпня", "вересня", "жовтня", "листопада", "грудня",
+                                                   "завтра", "післязавтра"])
+        if not ((has_time and has_place) or (has_date and has_time)):
             return
     else:
         # Прямий тригер — ігноруємо cooldown
@@ -1246,11 +1266,30 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if reg:
             if ev["is_paid"] and not reg["paid"]:
                 buttons.append([InlineKeyboardButton("Оплатити", callback_data=f"event_pay_{event_id}")])
-            buttons.append([InlineKeyboardButton("✅ Зареєстрована", callback_data="noop")])
+            buttons.append([
+                InlineKeyboardButton("✅ Зареєстрована", callback_data="noop"),
+                InlineKeyboardButton("❌ Скасувати", callback_data=f"event_unreg_{event_id}"),
+            ])
         elif ev["max_spots"] == 0 or ev["spots_left"] > 0:
             buttons.append([InlineKeyboardButton("Зареєструватись", callback_data=f"event_reg_{event_id}")])
         buttons.append([back_btn("Події", "events"), menu_btn()])
         await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(buttons))
+
+    elif data.startswith("event_unreg_"):
+        event_id = int(data.split("_")[2])
+        conn = get_conn()
+        conn.execute(
+            "DELETE FROM event_registrations WHERE event_id=? AND member_id=?",
+            (event_id, member["id"])
+        )
+        conn.commit()
+        ev = conn.execute("SELECT title FROM events WHERE id=?", (event_id,)).fetchone()
+        conn.close()
+        title = dict(ev)["title"] if ev else "подію"
+        await query.edit_message_text(
+            f"Реєстрацію на «{title}» скасовано.",
+            reply_markup=InlineKeyboardMarkup([[back_btn("Події", "events"), menu_btn()]])
+        )
 
     elif data.startswith("event_reg_"):
         event_id = int(data.split("_")[2])
