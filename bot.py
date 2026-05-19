@@ -11,8 +11,14 @@ import os
 import json
 from datetime import datetime, date, time as dtime, timedelta
 from typing import Optional
+from functools import wraps
+from contextlib import contextmanager
+import hmac
+import hashlib
+import asyncio
+from aiohttp import web
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
 from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler,
     MessageHandler, ChatMemberHandler, filters, ContextTypes,
@@ -32,13 +38,13 @@ INVITE_LINK         = os.getenv("INVITE_LINK", "https://t.me/+YOUR")
 INSTAGRAM_COMMUNITY = os.getenv("INSTAGRAM_COMMUNITY", "https://www.instagram.com/your_community/")
 INSTAGRAM_FOUNDER   = os.getenv("INSTAGRAM_FOUNDER", "https://www.instagram.com/vmuravska/")
 FORWARD_CHANNEL_ID  = int(os.getenv("FORWARD_CHANNEL_ID", "0"))
-WFP_SUB_URL         = os.getenv("WFP_SUB_URL", "https://secure.wayforpay.com/sub/womenscommune")
-WFP_PRODUCT_3M      = os.getenv("WFP_PRODUCT_3M", "Легкий старт")
-WFP_PRODUCT_6M      = os.getenv("WFP_PRODUCT_6M", "Впевнена стабільність")
-WFP_PRODUCT_1Y      = os.getenv("WFP_PRODUCT_1Y", "Тотальна довіра")
+WFP_URL_30D         = os.getenv("WFP_URL_30D",  "https://secure.wayforpay.com/payment/sed085c8f9a43")
+WFP_URL_90D         = os.getenv("WFP_URL_90D",  "https://secure.wayforpay.com/payment/s528da72c2353")
+WFP_URL_180D        = os.getenv("WFP_URL_180D", "https://secure.wayforpay.com/payment/s600527299905")
 WFP_MERCHANT        = os.getenv("WFP_MERCHANT_ACCOUNT", "")
 WFP_SECRET          = os.getenv("WFP_SECRET_KEY", "")
-WFP_DOMAIN          = os.getenv("WFP_DOMAIN", "your-domain.railway.app")
+WFP_DOMAIN          = os.getenv("WFP_DOMAIN", "spectacular-warmth.up.railway.app")
+WFP_WEBHOOK_PORT    = int(os.getenv("PORT", "8080"))
 GEMINI_API_KEY      = os.getenv("GEMINI_API_KEY", "")
 GEMINI_MODEL        = os.getenv("GEMINI_MODEL", "gemini-pro")
 
@@ -91,6 +97,26 @@ def get_conn():
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     return conn
+
+@contextmanager
+def db():
+    conn = get_conn()
+    try:
+        yield conn
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+def admin_only(func):
+    @wraps(func)
+    async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE, *args, **kwargs):
+        if update.effective_user and update.effective_user.id not in ADMIN_IDS:
+            return
+        return await func(update, context, *args, **kwargs)
+    return wrapper
 
 def init_db():
     conn = get_conn()
@@ -383,6 +409,28 @@ async def send_to_group(context: ContextTypes.DEFAULT_TYPE, text: str, congrats:
             await context.bot.send_message(chat_id=GROUP_CHAT_ID, text=text, message_thread_id=CONGRATS_THREAD_ID)
         except Exception as e:
             logger.error(f"Помилка в гілку привітань: {e}")
+
+
+TARIFFS = [
+    {"label": "30 днів — 677 грн",   "days": 30,  "url": WFP_URL_30D},
+    {"label": "90 днів — 1699 грн",  "days": 90,  "url": WFP_URL_90D},
+    {"label": "180 днів — 2888 грн", "days": 180, "url": WFP_URL_180D},
+]
+
+async def _show_tariffs(target):
+    buttons = [[InlineKeyboardButton(t["label"], url=t["url"])] for t in TARIFFS]
+    buttons.append([InlineKeyboardButton("◀️ Назад", callback_data="menu")])
+    text = (
+        "Оберіть тариф для оплати:\n\n"
+        "▪️ 30 днів — 677 грн\n"
+        "▪️ 90 днів — 1699 грн\n"
+        "▪️ 180 днів — 2888 грн\n\n"
+        "Після оплати підписка активується автоматично 🌸"
+    )
+    if hasattr(target, "edit_message_text"):
+        await target.edit_message_text(text, reply_markup=InlineKeyboardMarkup(buttons))
+    else:
+        await target.reply_text(text, reply_markup=InlineKeyboardMarkup(buttons))
 
 # ─── UI хелпери ───────────────────────────────────────────────────────────────
 
@@ -1094,29 +1142,17 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if data == "subscribe":
-        await query.edit_message_text(
-            "Натисни кнопку щоб обрати план і оплатити.\n\nПісля оплати підписка активується автоматично.",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("Хочу приєднатись", url=WFP_SUB_URL)],
-                [InlineKeyboardButton("Я оплатила", callback_data=f"sub_paid_{member['id']}" if member else "menu")],
-                [back_btn()],
-            ])
-        )
-        return
-
-    if data.startswith("sub_paid_"):
-        mid = int(data.split("_")[2])
-        m = get_member_by_id(mid)
-        for admin_id in ADMIN_IDS:
-            try:
-                await context.bot.send_message(
-                    admin_id,
-                    f"Оплата підписки:\n{m['name'] if m else mid} {m.get('username','') if m else ''}\n"
-                    f"Якщо не активувалась — /renewsub {m.get('username', m['name']) if m else mid} 3"
+        if member and not member.get("phone"):
+            context.user_data["after_phone"] = "subscribe"
+            await query.message.reply_text(
+                "Одне уточнення — поділись своїм номером телефону, аби ми знали про твою оплату 🌸",
+                reply_markup=ReplyKeyboardMarkup(
+                    [[KeyboardButton("📱 Поділитись номером", request_contact=True)]],
+                    one_time_keyboard=True, resize_keyboard=True
                 )
-            except Exception:
-                pass
-        await query.edit_message_text("Дякуємо! Якщо оплата пройшла — підписку активовано автоматично.\nЯкщо ні — напиши адміну.")
+            )
+            return
+        await _show_tariffs(query)
         return
 
     if data == "subscription":
@@ -2621,6 +2657,96 @@ async def job_recurring_reminders(context: ContextTypes.DEFAULT_TYPE):
 
     conn.close()
 
+
+# ─── Шеринг телефону ──────────────────────────────────────────────────────────
+
+async def handle_contact(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    contact = update.message.contact
+    if not contact:
+        return
+    phone = contact.phone_number
+    if not phone.startswith("+"):
+        phone = "+" + phone
+    conn = get_conn()
+    conn.execute("UPDATE members SET phone=? WHERE telegram_id=?", (phone, update.effective_user.id))
+    conn.commit()
+    conn.close()
+    await update.message.reply_text("Дякуємо! Телефон збережено 🌸", reply_markup=ReplyKeyboardRemove())
+    if context.user_data.pop("after_phone", None) == "subscribe":
+        await _show_tariffs(update.message)
+
+
+# ─── WayForPay вебхук ─────────────────────────────────────────────────────────
+
+def _wfp_verify(data: dict) -> bool:
+    if not WFP_SECRET:
+        return True
+    params = [data.get(k, "") for k in ["merchantAccount","orderReference","amount","currency","authCode","cardPan","transactionStatus","reasonCode"]]
+    sign_str = ";".join(str(p) for p in params)
+    expected = hmac.new(WFP_SECRET.encode(), sign_str.encode(), hashlib.md5).hexdigest()
+    return hmac.compare_digest(expected, data.get("merchantSignature", ""))
+
+def _days_from_order(ref: str) -> int:
+    r = ref.lower()
+    if "180" in r: return 180
+    if "90" in r or "3m" in r: return 90
+    return 30
+
+async def wfp_webhook_handler(request: web.Request) -> web.Response:
+    try:
+        data = await request.json()
+    except Exception:
+        return web.Response(status=400)
+    logger.info(f"WFP webhook: {data.get('transactionStatus')} / {data.get('phone')}")
+    if data.get("transactionStatus") != "Approved":
+        return web.json_response({"status": "ok"})
+    if not _wfp_verify(data):
+        logger.warning("WFP webhook: невірний підпис!")
+        return web.Response(status=403)
+    phone = data.get("phone", "").strip()
+    if phone and not phone.startswith("+"):
+        phone = "+" + phone
+    days = _days_from_order(data.get("orderReference", ""))
+    until = (date.today() + timedelta(days=days)).isoformat()
+    conn = get_conn()
+    member = None
+    if phone:
+        row = conn.execute("SELECT * FROM members WHERE phone=? LIMIT 1", (phone,)).fetchone()
+        if row:
+            member = dict(row)
+    if member:
+        conn.execute(
+            "UPDATE members SET subscription_until=?, subscription_plan=?, is_active=1 WHERE id=?",
+            (until, f"{days}d", member["id"])
+        )
+        conn.commit()
+    conn.close()
+    bot = request.app["bot"]
+    plan_label = {30: "30 днів", 90: "90 днів", 180: "180 днів"}.get(days, f"{days} днів")
+    if member and member.get("telegram_id"):
+        try:
+            await bot.send_message(
+                member["telegram_id"],
+                f"Ти оплатила пакет доступу {plan_label}\n\n"
+                f"Сподіваємось наша подорож у неосяжний світ жіноцтва надихне тебе на зміни 🧡\n\n"
+                f"Наступний крок за тобою.\n\nЗапрошуємо! {INVITE_LINK}"
+            )
+        except Exception as e:
+            logger.error(f"Помилка повідомлення: {e}")
+    name_str = member.get("name", "Невідома") if member else f"тел. {phone}"
+    uname_str = f" @{member['username']}" if member and member.get("username") else ""
+    for admin_id in ADMIN_IDS:
+        try:
+            await bot.send_message(
+                admin_id,
+                f"✅ Нова оплата підписки!\n\n👤 {name_str}{uname_str}\n"
+                f"📱 {phone}\n📅 Тариф: {plan_label}\n"
+                f"📆 До: {date.fromisoformat(until).strftime('%d.%m.%Y')}"
+            )
+        except Exception as e:
+            logger.error(f"Помилка сповіщення адміну: {e}")
+    return web.json_response({"status": "ok"})
+
 # ─── main ─────────────────────────────────────────────────────────────────────
 
 def main():
@@ -2659,8 +2785,31 @@ def main():
     app.job_queue.run_daily(job_thursday_digest, time=dtime(hour=9, minute=0), days=(3,), name="thursday_digest")
     app.job_queue.run_repeating(job_recurring_reminders, interval=3600, first=60, name="recurring_check")
 
+    app.add_handler(MessageHandler(filters.CONTACT, handle_contact))
+
     logger.info("Community Bot v2 запущено!")
-    app.run_polling(drop_pending_updates=True)
+
+    async def run_all():
+        web_app = web.Application()
+        web_app["bot"] = app.bot
+        web_app.router.add_post("/wfp-webhook", wfp_webhook_handler)
+        runner = web.AppRunner(web_app)
+        await runner.setup()
+        site = web.TCPSite(runner, "0.0.0.0", WFP_WEBHOOK_PORT)
+        await site.start()
+        logger.info(f"WFP webhook сервер на порту {WFP_WEBHOOK_PORT}")
+        await app.initialize()
+        await app.start()
+        await app.updater.start_polling(drop_pending_updates=True)
+        try:
+            await asyncio.Event().wait()
+        finally:
+            await app.updater.stop()
+            await app.stop()
+            await app.shutdown()
+            await runner.cleanup()
+
+    asyncio.run(run_all())
 
 if __name__ == "__main__":
     main()
