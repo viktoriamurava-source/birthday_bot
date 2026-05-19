@@ -177,6 +177,24 @@ def init_db():
             msg_count INTEGER DEFAULT 0,
             UNIQUE (member_id, msg_date)
         );
+        CREATE TABLE IF NOT EXISTS recurring_events (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            title        TEXT NOT NULL,
+            description  TEXT,
+            location     TEXT,
+            weekday      INTEGER NOT NULL,
+            event_time   TEXT NOT NULL,
+            is_active    INTEGER DEFAULT 1,
+            active_until TEXT NOT NULL,
+            created_at   TEXT DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE TABLE IF NOT EXISTS recurring_registrations (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            event_id   INTEGER NOT NULL,
+            member_id  INTEGER NOT NULL,
+            week_start TEXT NOT NULL,
+            UNIQUE (event_id, member_id, week_start)
+        );
     """)
     for col, definition in [
         ("username", "TEXT"), ("birth_year", "INTEGER"), ("city", "TEXT"),
@@ -914,40 +932,30 @@ _IMMEDIATE_TRIGGERS = [
 async def handle_ai_events(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global _last_ai_check
     msg = update.message
-    if not msg or msg.chat_id != GROUP_CHAT_ID:
-        return
-    if GROUP_THREAD_ID and msg.message_thread_id != GROUP_THREAD_ID:
+    if not msg or not msg.text or msg.chat_id != GROUP_CHAT_ID:
         return
 
-    # Текст з пересланого або звичайного
-    is_forward = bool(msg.forward_origin or msg.forward_from or msg.forward_from_chat)
-    text = msg.text or msg.caption or ""
-    if not text:
-        return
+    text_lower = msg.text.lower()
+    immediate = any(kw in text_lower for kw in _IMMEDIATE_TRIGGERS)
 
-    text_lower = text.lower()
-    event_hints = ["місце", "адрес", "вул.", "вулиц", "о ", "вхід", "реєстрац", "запис", "участь", "грн", "безкоштовно"]
-    if is_forward and any(kw in text_lower for kw in event_hints):
-        immediate = True
-        logger.info(f"AI event: пересилане з ознаками події")
-    else:
-        immediate = any(kw in text_lower for kw in _IMMEDIATE_TRIGGERS)
-
-    sender = msg.from_user.first_name if msg.from_user else "Невідома"
-    _msg_buffer.append(f"{sender}: {text}")
+    _msg_buffer.append(f"{msg.from_user.first_name}: {msg.text}")
     if len(_msg_buffer) > 20:
         _msg_buffer.pop(0)
 
     now = datetime.now()
 
     if not immediate:
+        # Без прямого тригера — перевіряємо cooldown і буфер
         if (now - _last_ai_check).seconds < 300:
             return
         general = ["захід", "о котрій", "де зустрічаємось", "зустріч"]
         if not any(kw in " ".join(_msg_buffer).lower() for kw in general):
             return
     else:
-        logger.info(f"AI event immediate trigger: {text[:50]}")
+        # Прямий тригер — ігноруємо cooldown
+        logger.info(f"AI event immediate trigger: {msg.text[:50]}")
+
+    _last_ai_check = now
     from datetime import date as _date
     today = _date.today().isoformat()
     result = await gemini_call(
@@ -1178,16 +1186,45 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "SELECT * FROM events WHERE is_active=1 AND event_date >= ? ORDER BY event_date LIMIT 10",
             (date.today().isoformat(),)
         ).fetchall()
+        recurring = conn.execute(
+            "SELECT * FROM recurring_events WHERE is_active=1 AND active_until >= ? ORDER BY weekday",
+            (date.today().isoformat(),)
+        ).fetchall()
         conn.close()
-        if not events:
+        if not events and not recurring:
             await query.edit_message_text("Найближчих подій немає.", reply_markup=InlineKeyboardMarkup([[menu_btn()]]))
             return
         buttons = []
         for ev in events:
             icon = "💰" if ev["is_paid"] else "🆓"
             buttons.append([InlineKeyboardButton(f"{icon} {ev['title']} — {ev['event_date']}", callback_data=f"event_{ev['id']}")])
+        for rev in recurring:
+            rev = dict(rev)
+            day_name = WEEKDAYS_NAME[rev["weekday"]]
+            buttons.append([InlineKeyboardButton(f"🔄 {rev['title']} — щo{day_name} о {rev['event_time']}", callback_data=f"rec_view_{rev['id']}")])
         buttons.append([menu_btn()])
         await query.edit_message_text("Майбутні події:", reply_markup=InlineKeyboardMarkup(buttons))
+
+    elif data.startswith("rec_view_"):
+        ev_id = int(data.split("_")[2])
+        conn = get_conn()
+        ev = conn.execute("SELECT * FROM recurring_events WHERE id=?", (ev_id,)).fetchone()
+        conn.close()
+        if not ev:
+            return
+        ev = dict(ev)
+        day_name = WEEKDAYS_NAME[ev["weekday"]]
+        next_date = get_next_weekday(ev["weekday"])
+        location_str = f"\n🔗 {ev['location']}" if ev.get("location") else ""
+        text = (
+            f"🔄 {ev['title']}\n\n"
+            f"Повторення: щo{day_name} о {ev['event_time']}\n"
+            f"Наступна зустріч: {next_date.strftime('%d.%m.%Y')}"
+            f"{location_str}"
+        )
+        buttons = [[InlineKeyboardButton("Зареєструватись", callback_data=f"rec_join_{ev_id}")]]
+        buttons.append([back_btn("Події", "events"), menu_btn()])
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(buttons))
 
     elif data.startswith("event_") and not any(x in data for x in ["_reg_", "_pay_"]):
         try:
@@ -1280,88 +1317,92 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("Скасовано")
 
 
-    elif data.startswith("adm_evmembers_"):
-        event_id = int(data.split("_")[2])
+    elif data.startswith("rec_add_"):
+        # rec_add_{weekday}_{time}_{title}
+        parts = data.split("_", 4)
+        weekday = int(parts[2])
+        time_str = parts[3]
+        title = parts[4] if len(parts) > 4 else "Подія"
+        event_data = context.bot_data.get(f"ai_event_{user_id}", {})
+        location = event_data.get("location") or ""
+        from datetime import date as _d
+        active_until = (_d.today() + timedelta(days=30)).isoformat()
         conn = get_conn()
-        ev = conn.execute("SELECT * FROM events WHERE id=?", (event_id,)).fetchone()
-        regs = conn.execute("""
-            SELECT er.id as reg_id, m.name, m.username
-            FROM event_registrations er
-            JOIN members m ON er.member_id = m.id
-            WHERE er.event_id = ?
-            ORDER BY m.name
-        """, (event_id,)).fetchall()
+        conn.execute(
+            "INSERT INTO recurring_events (title, location, weekday, event_time, active_until) VALUES (?,?,?,?,?)",
+            (title, location, weekday, time_str, active_until)
+        )
+        conn.commit()
         conn.close()
-        if not ev:
-            await query.edit_message_text("Подію не знайдено.")
-            return
-        if not regs:
-            await query.edit_message_text(f"На подію «{ev['title']}» ніхто не записаний.")
-            return
-        lines = [f"📋 Записані на «{ev['title']}» ({len(regs)}):"]
-        for r in regs:
-            uname = f" @{r['username']}" if r['username'] else ""
-            lines.append(f"• {r['name']}{uname}")
-        buttons = []
-        for r in regs:
-            uname = f"@{r['username']}" if r['username'] else r['name']
-            buttons.append([InlineKeyboardButton(
-                f"❌ {r['name']}", callback_data=f"adm_evrm_{r['reg_id']}_{event_id}"
-            )])
-        buttons.append([InlineKeyboardButton("◀️ Назад", callback_data="admin_panel")])
+        weekday_name = WEEKDAYS_NAME[weekday]
         await query.edit_message_text(
-            "\n".join(lines) + "\n\nНатисни ❌ щоб видалити учасницю зі списку:",
-            reply_markup=InlineKeyboardMarkup(buttons)
+            f"✅ Регулярна подія додана!\n\n"
+            f"«{title}» — що{weekday_name} о {time_str}\n"
+            f"Активна до: {date.fromisoformat(active_until).strftime('%d.%m.%Y')}"
         )
 
-    elif data.startswith("adm_evrm_"):
-        parts = data.split("_")
-        reg_id = int(parts[2])
-        event_id = int(parts[3])
+    elif data.startswith("rec_extend_"):
+        ev_id = int(data.split("_")[2])
         conn = get_conn()
-        reg = conn.execute(
-            "SELECT er.id, m.name FROM event_registrations er JOIN members m ON er.member_id=m.id WHERE er.id=?",
-            (reg_id,)
-        ).fetchone()
-        if reg:
-            conn.execute("DELETE FROM event_registrations WHERE id=?", (reg_id,))
+        ev = conn.execute("SELECT * FROM recurring_events WHERE id=?", (ev_id,)).fetchone()
+        if ev:
+            from datetime import date as _d
+            new_until = (_d.today() + timedelta(days=30)).isoformat()
+            conn.execute("UPDATE recurring_events SET active_until=?, is_active=1 WHERE id=?", (new_until, ev_id))
             conn.commit()
-            name = reg['name']
-        conn.close()
-        if reg:
-            await query.answer(f"✅ {name} видалена зі списку")
-            # Оновлюємо список
-            fake_data = f"adm_evmembers_{event_id}"
-            # Перезавантажуємо список
-            conn2 = get_conn()
-            ev = conn2.execute("SELECT * FROM events WHERE id=?", (event_id,)).fetchone()
-            regs = conn2.execute("""
-                SELECT er.id as reg_id, m.name, m.username
-                FROM event_registrations er
-                JOIN members m ON er.member_id = m.id
-                WHERE er.event_id = ?
-                ORDER BY m.name
-            """, (event_id,)).fetchall()
-            conn2.close()
-            if not regs:
-                await query.edit_message_text(f"На подію «{ev['title']}» більше нікого немає.")
-                return
-            lines = [f"📋 Записані на «{ev['title']}» ({len(regs)}):"]
-            for r in regs:
-                uname = f" @{r['username']}" if r['username'] else ""
-                lines.append(f"• {r['name']}{uname}")
-            buttons = []
-            for r in regs:
-                buttons.append([InlineKeyboardButton(
-                    f"❌ {r['name']}", callback_data=f"adm_evrm_{r['reg_id']}_{event_id}"
-                )])
-            buttons.append([InlineKeyboardButton("◀️ Назад", callback_data="admin_panel")])
             await query.edit_message_text(
-                "\n".join(lines) + "\n\nНатисни ❌ щоб видалити учасницю зі списку:",
-                reply_markup=InlineKeyboardMarkup(buttons)
+                f"✅ Подію «{dict(ev)['title']}» продовжено до {date.fromisoformat(new_until).strftime('%d.%m.%Y')}"
             )
-        else:
-            await query.answer("Запис не знайдено")
+        conn.close()
+
+    elif data.startswith("rec_stop_"):
+        ev_id = int(data.split("_")[2])
+        conn = get_conn()
+        ev = conn.execute("SELECT * FROM recurring_events WHERE id=?", (ev_id,)).fetchone()
+        if ev:
+            conn.execute("UPDATE recurring_events SET is_active=0 WHERE id=?", (ev_id,))
+            conn.commit()
+            await query.edit_message_text(f"🛑 Подію «{dict(ev)['title']}» завершено.")
+        conn.close()
+
+    elif data == "rec_skip":
+        await query.edit_message_text("Скасовано.")
+
+    elif data == "rec_edit":
+        await query.edit_message_text(
+            "Щоб відредагувати подію перед додаванням — напиши мені деталі:\n"
+            "Назва, день тижня, час, місце/посилання"
+        )
+
+    elif data.startswith("rec_join_"):
+        ev_id = int(data.split("_")[2])
+        member = get_member(user_id)
+        if not member:
+            await query.answer("Спочатку зареєструйся через /start")
+            return
+        from datetime import date as _d
+        week_start = get_week_start(_d.today())
+        conn = get_conn()
+        try:
+            conn.execute(
+                "INSERT OR IGNORE INTO recurring_registrations (event_id, member_id, week_start) VALUES (?,?,?)",
+                (ev_id, member["id"], week_start)
+            )
+            conn.commit()
+            await query.answer("✅ Зареєстрована!")
+            ev = conn.execute("SELECT * FROM recurring_events WHERE id=?", (ev_id,)).fetchone()
+            if ev:
+                ev = dict(ev)
+                location_text = f"\n🔗 {ev['location']}" if ev.get("location") else ""
+                await query.edit_message_text(
+                    f"✅ Зареєстрована на «{ev['title']}»!\n"
+                    f"Час: {ev['event_time']}{location_text}\n\n"
+                    f"За годину до початку отримаєш нагадування 🌸"
+                )
+        except Exception as e:
+            logger.error(f"rec_join error: {e}")
+            await query.answer("Вже зареєстрована!")
+        conn.close()
 
     elif data == "admin_panel":
         await query.edit_message_text(
@@ -1496,13 +1537,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if GEMINI_API_KEY and msg.chat_id == GROUP_CHAT_ID:
             await handle_auto_reply(update, context)
             await handle_ai_events(update, context)
-        return
-
-    # Пересилані повідомлення в групі (без тексту як text-message)
-    if update.effective_chat and update.effective_chat.type in ("group", "supergroup"):
-        if msg and (msg.forward_origin or msg.forward_from or msg.forward_from_chat):
-            if GEMINI_API_KEY and msg.chat_id == GROUP_CHAT_ID:
-                await handle_ai_events(update, context)
         return
 
     # Приватні
@@ -1694,36 +1728,6 @@ async def cmd_birthdays(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 tag = ""
             lines.append(f"  {d:02d}.{mo:02d} — {name}{tag}")
     await update.message.reply_text("\n".join(lines))
-
-
-async def cmd_event_members(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Адмін: список записаних на подію з можливістю видалення."""
-    if update.effective_user.id not in ADMIN_IDS:
-        return
-    conn = get_conn()
-    # Беремо майбутні або поточні події
-    events = conn.execute("""
-        SELECT e.id, e.title, e.event_date,
-               COUNT(er.id) as reg_count
-        FROM events e
-        LEFT JOIN event_registrations er ON er.event_id = e.id
-        WHERE e.event_date >= date('now', '-1 day')
-        GROUP BY e.id
-        ORDER BY e.event_date ASC
-        LIMIT 10
-    """).fetchall()
-    conn.close()
-    if not events:
-        await update.message.reply_text("Активних подій немає.")
-        return
-    buttons = []
-    for ev in events:
-        label = f"{ev['title']} ({ev['event_date']}) — {ev['reg_count']} записаних"
-        buttons.append([InlineKeyboardButton(label, callback_data=f"adm_evmembers_{ev['id']}")])
-    await update.message.reply_text(
-        "Оберіть подію:",
-        reply_markup=InlineKeyboardMarkup(buttons)
-    )
 
 async def cmd_event_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id not in ADMIN_IDS:
@@ -2223,6 +2227,223 @@ async def _save_event(target, context: ContextTypes.DEFAULT_TYPE):
     else:
         await target.message.reply_text(result_text)
 
+
+# ─── Регулярні події ───────────────────────────────────────────────────────────
+
+WEEKDAYS_UA = {
+    "понеділок": 0, "вівторок": 1, "середа": 2, "середи": 2, "середу": 2,
+    "четвер": 3, "п'ятниця": 4, "п'ятницю": 4, "субота": 5, "суботу": 5,
+    "неділя": 6, "неділю": 6,
+}
+WEEKDAYS_NAME = ["понеділок", "вівторок", "середу", "четвер", "п'ятницю", "суботу", "неділю"]
+
+def get_next_weekday(weekday: int) -> date:
+    """Повертає дату наступного вказаного дня тижня."""
+    today = date.today()
+    days_ahead = weekday - today.weekday()
+    if days_ahead <= 0:
+        days_ahead += 7
+    return today + timedelta(days=days_ahead)
+
+def get_week_start(d: date) -> str:
+    """Повертає ISO рядок початку тижня (понеділок)."""
+    return (d - timedelta(days=d.weekday())).isoformat()
+
+async def handle_bot_mention(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обробляє звернення до бота в чаті групи."""
+    msg = update.message
+    if not msg or not msg.text or msg.chat_id != GROUP_CHAT_ID:
+        return
+    if GROUP_THREAD_ID and msg.message_thread_id != GROUP_THREAD_ID:
+        return
+    text = msg.text
+    text_lower = text.lower()
+    # Перевіряємо чи є звернення до бота
+    bot_mentions = ["помічник комуни", "@помічникkomuni", "помічнику комуни"]
+    bot_username = (context.bot.username or "").lower()
+    if bot_username:
+        bot_mentions.append(f"@{bot_username}")
+    if not any(m in text_lower for m in bot_mentions):
+        return
+    logger.info(f"Звернення до бота: {text[:80]}")
+    # Передаємо Gemini для аналізу
+    from datetime import date as _date
+    today = _date.today().isoformat()
+    result = await gemini_call(
+        f"Сьогодні {today}. Проаналізуй звернення до бота: \"{text}\"\n\n"
+        f"Визнач чи це прохання додати подію.\n"
+        f"Якщо так — поверни JSON:\n"
+        f"{{\n"
+        f"  \"type\": \"recurring\" або \"once\",\n"
+        f"  \"title\": \"назва події\",\n"
+        f"  \"weekday\": день тижня (0=пн, 1=вт, 2=ср, 3=чт, 4=пт, 5=сб, 6=нд) або null,\n"
+        f"  \"date\": \"YYYY-MM-DD\" або null,\n"
+        f"  \"time\": \"ЧЧ:ХХ\" або null,\n"
+        f"  \"location\": \"місце або посилання\" або null\n"
+        f"}}\n"
+        f"Якщо це не прохання про подію — поверни null.",
+        300
+    )
+    if not result or result.strip().lower() == "null":
+        return
+    try:
+        cleaned = result.replace("```json", "").replace("```", "").strip()
+        event_data = json.loads(cleaned)
+    except Exception:
+        return
+
+    event_type = event_data.get("type", "once")
+    title = event_data.get("title", "Подія")
+    time_str = event_data.get("time") or "—"
+    location = event_data.get("location") or "—"
+    weekday = event_data.get("weekday")
+    ev_date = event_data.get("date")
+
+    if event_type == "recurring" and weekday is not None:
+        weekday_name = WEEKDAYS_NAME[int(weekday)]
+        text_admin = (
+            f"📅 Запит на регулярну подію з чату:\n\n"
+            f"Назва: {title}\n"
+            f"Повторення: щo{weekday_name}\n"
+            f"Час: {time_str}\n"
+            f"Місце/посилання: {location}\n\n"
+            f"Додати на місяць?"
+        )
+        buttons = [[
+            InlineKeyboardButton("✅ Додати", callback_data=f"rec_add_{weekday}_{time_str}_{title[:20]}"),
+            InlineKeyboardButton("✏️ Редагувати", callback_data=f"rec_edit"),
+            InlineKeyboardButton("❌ Скасувати", callback_data="rec_skip"),
+        ]]
+    else:
+        date_str = ev_date or "—"
+        text_admin = (
+            f"📅 Запит на подію з чату:\n\n"
+            f"Назва: {title}\n"
+            f"Дата: {date_str}\n"
+            f"Час: {time_str}\n"
+            f"Місце/посилання: {location}\n\n"
+            f"Додати подію?"
+        )
+        buttons = [[
+            InlineKeyboardButton("✅ Додати", callback_data="ai_add"),
+            InlineKeyboardButton("✏️ Редагувати", callback_data="ai_edit"),
+            InlineKeyboardButton("❌ Скасувати", callback_data="ai_skip"),
+        ]]
+
+    for admin_id in ADMIN_IDS:
+        try:
+            await context.bot.send_message(
+                admin_id, text_admin,
+                reply_markup=InlineKeyboardMarkup(buttons)
+            )
+            context.bot_data[f"ai_event_{admin_id}"] = event_data
+        except Exception as e:
+            logger.error(f"Помилка надсилання адміну: {e}")
+
+
+async def job_recurring_reminders(context: ContextTypes.DEFAULT_TYPE):
+    """Щоденна перевірка регулярних подій — нагадування в чат і особисті."""
+    conn = get_conn()
+    now = datetime.now()
+    today = date.today()
+    current_weekday = today.weekday()
+    events = conn.execute(
+        "SELECT * FROM recurring_events WHERE is_active=1 AND active_until >= ?",
+        (today.isoformat(),)
+    ).fetchall()
+
+    for ev in events:
+        ev = dict(ev)
+        ev_weekday = ev["weekday"]
+        ev_time_str = ev["event_time"]
+        try:
+            ev_hour, ev_min = map(int, ev_time_str.split(":"))
+        except Exception:
+            continue
+
+        days_until = (ev_weekday - current_weekday) % 7
+        if days_until == 0:
+            days_until = 7
+
+        # За 7 днів — нагадування в чат
+        if days_until == 7:
+            next_date = today + timedelta(days=7)
+            msg = (
+                f"📅 Нагадуємо — наступного {WEEKDAYS_NAME[ev_weekday]} о {ev_time_str} "
+                f"у нас {ev['title']}!\n\n"
+                f"Зареєструватись можна в боті 👇"
+            )
+            kwargs = {"chat_id": GROUP_CHAT_ID, "text": msg}
+            if GROUP_THREAD_ID:
+                kwargs["message_thread_id"] = GROUP_THREAD_ID
+            try:
+                await context.bot.send_message(**kwargs)
+            except Exception as e:
+                logger.error(f"Помилка нагадування в чат (7д): {e}")
+
+        # За 1 день — нагадування в чат
+        if days_until == 1:
+            msg = (
+                f"⏰ Завтра о {ev_time_str} — {ev['title']}!\n\n"
+                f"Ще не записалась? Реєструйся в боті 👇"
+            )
+            kwargs = {"chat_id": GROUP_CHAT_ID, "text": msg}
+            if GROUP_THREAD_ID:
+                kwargs["message_thread_id"] = GROUP_THREAD_ID
+            try:
+                await context.bot.send_message(**kwargs)
+            except Exception as e:
+                logger.error(f"Помилка нагадування в чат (1д): {e}")
+
+        # За 1 годину — особисте повідомлення зареєстрованим
+        if days_until == 0 or (days_until == 7 and current_weekday == ev_weekday):
+            event_dt = datetime.combine(today, __import__('datetime').time(ev_hour, ev_min))
+            diff_minutes = (event_dt - now).total_seconds() / 60
+            if 55 <= diff_minutes <= 65:
+                week_start = get_week_start(today)
+                regs = conn.execute("""
+                    SELECT m.telegram_id, m.name FROM recurring_registrations rr
+                    JOIN members m ON rr.member_id = m.id
+                    WHERE rr.event_id=? AND rr.week_start=?
+                """, (ev["id"], week_start)).fetchall()
+                location_text = f"\n\n🔗 {ev['location']}" if ev.get("location") else ""
+                for reg in regs:
+                    try:
+                        await context.bot.send_message(
+                            reg["telegram_id"],
+                            f"⏰ За годину починається {ev['title']}!\n"
+                            f"Час: {ev_time_str}{location_text}"
+                        )
+                    except Exception:
+                        pass
+
+    # Щомісячне питання про продовження
+    for ev in events:
+        ev = dict(ev)
+        active_until = date.fromisoformat(ev["active_until"])
+        days_left = (active_until - today).days
+        if days_left == 3:
+            for admin_id in ADMIN_IDS:
+                try:
+                    await context.bot.send_message(
+                        admin_id,
+                        f"📅 Регулярна подія «{ev['title']}» закінчується через 3 дні ({active_until.strftime('%d.%m.%Y')}).\n\nПродовжити ще на місяць?",
+                        reply_markup=InlineKeyboardMarkup([[
+                            InlineKeyboardButton("✅ Продовжити", callback_data=f"rec_extend_{ev['id']}"),
+                            InlineKeyboardButton("❌ Завершити", callback_data=f"rec_stop_{ev['id']}"),
+                        ]])
+                    )
+                except Exception as e:
+                    logger.error(f"Помилка нагадування про продовження: {e}")
+
+    # Скидаємо реєстрації після завершення тижня (о 00:00 в понеділок)
+    if current_weekday == 0 and now.hour == 0:
+        last_week = get_week_start(today - timedelta(days=7))
+        conn.execute("DELETE FROM recurring_registrations WHERE week_start=?", (last_week,))
+        conn.commit()
+
+    conn.close()
+
 # ─── main ─────────────────────────────────────────────────────────────────────
 
 def main():
@@ -2244,7 +2465,6 @@ def main():
     app.add_handler(CommandHandler("subexpiring", cmd_sub_expiring))
     app.add_handler(CommandHandler("subexpired",  cmd_sub_expired))
     app.add_handler(CommandHandler("importsubs",  cmd_import_subs))
-    app.add_handler(CommandHandler("eventmembers", cmd_event_members))
     app.add_handler(CommandHandler("bycity",      cmd_by_city))
     app.add_handler(CommandHandler("addevent",    cmd_add_event))
     app.add_handler(CommandHandler("editevent",   cmd_edit_event))
@@ -2253,12 +2473,13 @@ def main():
 
     app.add_handler(CallbackQueryHandler(handle_callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
-    app.add_handler(MessageHandler(filters.FORWARDED & ~filters.COMMAND, handle_text))
+    app.add_handler(MessageHandler(filters.TEXT & filters.ChatType.GROUPS & ~filters.COMMAND, handle_bot_mention))
     app.add_handler(ChatMemberHandler(handle_new_member, ChatMemberHandler.CHAT_MEMBER))
 
     app.job_queue.run_daily(daily_check, time=dtime(hour=CHECK_HOUR_UTC, minute=0), name="daily_check")
     app.job_queue.run_daily(job_monday_digest, time=dtime(hour=7, minute=0), days=(0,), name="monday_digest")
     app.job_queue.run_daily(job_thursday_digest, time=dtime(hour=9, minute=0), days=(3,), name="thursday_digest")
+    app.job_queue.run_repeating(job_recurring_reminders, interval=3600, first=60, name="recurring_check")
 
     logger.info("Community Bot v2 запущено!")
     app.run_polling(drop_pending_updates=True)
