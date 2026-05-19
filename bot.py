@@ -2317,6 +2317,44 @@ async def cmd_import_csv(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Імпорт завершено!\n\n✅ Додано: {added}\n⏭ Вже були: {skipped}\n\nТепер /subexpired покаже всіх без підписки."
     )
 
+
+async def cmd_event_members(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Список записаних на подію з можливістю видалення."""
+    if update.effective_user.id not in ADMIN_IDS:
+        return
+    conn = get_conn()
+    events = conn.execute("""
+        SELECT e.id, e.title, e.event_date, COUNT(er.id) as reg_count
+        FROM events e LEFT JOIN event_registrations er ON er.event_id=e.id
+        WHERE e.event_date >= date('now','-1 day') AND e.is_active=1
+        GROUP BY e.id ORDER BY e.event_date ASC LIMIT 10
+    """).fetchall()
+    recurring = conn.execute("""
+        SELECT re.id, re.title, re.weekday, re.event_time, COUNT(rr.id) as reg_count
+        FROM recurring_events re LEFT JOIN recurring_registrations rr ON rr.event_id=re.id
+        WHERE re.is_active=1 AND re.active_until >= date('now')
+        GROUP BY re.id ORDER BY re.weekday ASC LIMIT 5
+    """).fetchall()
+    conn.close()
+    if not events and not recurring:
+        await update.message.reply_text("Активних подій немає.")
+        return
+    buttons = []
+    for ev in events:
+        ev = dict(ev)
+        buttons.append([InlineKeyboardButton(
+            f"📅 {ev['title']} ({ev['event_date']}) — {ev['reg_count']} чол.",
+            callback_data=f"adm_evmembers_{ev['id']}_once"
+        )])
+    for rev in recurring:
+        rev = dict(rev)
+        day = WEEKDAYS_NAME[rev['weekday']]
+        buttons.append([InlineKeyboardButton(
+            f"🔄 {rev['title']} (що{day}) — {rev['reg_count']} чол.",
+            callback_data=f"adm_evmembers_{rev['id']}_rec"
+        )])
+    await update.message.reply_text("Оберіть подію:", reply_markup=InlineKeyboardMarkup(buttons))
+
 async def cmd_edit_recurring(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Редагування регулярної події."""
     if update.effective_user.id not in ADMIN_IDS:
