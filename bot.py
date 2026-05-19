@@ -1574,6 +1574,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 conn.commit()
                 conn.close()
         if GEMINI_API_KEY and msg.chat_id == GROUP_CHAT_ID:
+            await handle_bot_mention(update, context)
             await handle_auto_reply(update, context)
             await handle_ai_events(update, context)
         return
@@ -2512,7 +2513,6 @@ def main():
 
     app.add_handler(CallbackQueryHandler(handle_callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
-    app.add_handler(MessageHandler(filters.TEXT & filters.ChatType.GROUPS & ~filters.COMMAND, handle_bot_mention))
     app.add_handler(ChatMemberHandler(handle_new_member, ChatMemberHandler.CHAT_MEMBER))
 
     app.job_queue.run_daily(daily_check, time=dtime(hour=CHECK_HOUR_UTC, minute=0), name="daily_check")
