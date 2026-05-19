@@ -1015,13 +1015,26 @@ _IMMEDIATE_TRIGGERS = [
 async def handle_ai_events(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global _last_ai_check
     msg = update.message
-    if not msg or not msg.text or msg.chat_id != GROUP_CHAT_ID:
+    if not msg or msg.chat_id != GROUP_CHAT_ID:
+        return
+    if GROUP_THREAD_ID and msg.message_thread_id != GROUP_THREAD_ID:
         return
 
-    text_lower = msg.text.lower()
-    immediate = any(kw in text_lower for kw in _IMMEDIATE_TRIGGERS)
+    is_forward = bool(msg.forward_origin or msg.forward_from or msg.forward_from_chat)
+    text = msg.text or msg.caption or ""
+    if not text:
+        return
 
-    _msg_buffer.append(f"{msg.from_user.first_name}: {msg.text}")
+    text_lower = text.lower()
+    event_hints = ["місце", "адрес", "вул.", "вулиц", "о ", "вхід", "реєстрац", "запис", "участь", "грн", "безкоштовно"]
+    if is_forward and any(kw in text_lower for kw in event_hints):
+        immediate = True
+        logger.info("AI event: пересилане з ознаками події")
+    else:
+        immediate = any(kw in text_lower for kw in _IMMEDIATE_TRIGGERS)
+
+    sender = msg.from_user.first_name if msg.from_user else "Невідома"
+    _msg_buffer.append(f"{sender}: {text}")
     if len(_msg_buffer) > 20:
         _msg_buffer.pop(0)
 
@@ -1540,6 +1553,105 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         }
         context.user_data["rec_edit"] = {"ev_id": ev_id, "field": field}
         await query.edit_message_text(f"Введи нову {field_names.get(field, field)}:")
+
+
+    elif data.startswith("adm_evmembers_"):
+        parts = data.split("_")
+        ev_id = int(parts[2])
+        ev_type = parts[3] if len(parts) > 3 else "once"
+        conn = get_conn()
+        if ev_type == "rec":
+            ev = conn.execute("SELECT * FROM recurring_events WHERE id=?", (ev_id,)).fetchone()
+            regs = conn.execute("""
+                SELECT rr.id as reg_id, m.name, m.username
+                FROM recurring_registrations rr JOIN members m ON rr.member_id=m.id
+                WHERE rr.event_id=? ORDER BY m.name
+            """, (ev_id,)).fetchall()
+        else:
+            ev = conn.execute("SELECT * FROM events WHERE id=?", (ev_id,)).fetchone()
+            regs = conn.execute("""
+                SELECT er.id as reg_id, m.name, m.username
+                FROM event_registrations er JOIN members m ON er.member_id=m.id
+                WHERE er.event_id=? ORDER BY m.name
+            """, (ev_id,)).fetchall()
+        conn.close()
+        title = dict(ev)["title"] if ev else "Подія"
+        if not regs:
+            await query.edit_message_text(f"На «{title}» ніхто не записаний.")
+            return
+        lines = [f"📋 Записані на «{title}» ({len(regs)}):"]
+        for r in regs:
+            r = dict(r)
+            uname = f" @{r['username']}" if r.get("username") else ""
+            lines.append(f"• {r['name']}{uname}")
+        buttons = []
+        for r in regs:
+            r = dict(r)
+            buttons.append([InlineKeyboardButton(
+                f"❌ {r['name']}", callback_data=f"adm_evrm_{r['reg_id']}_{ev_id}_{ev_type}"
+            )])
+        buttons.append([InlineKeyboardButton("◀️ Назад", callback_data="admin_panel")])
+        await query.edit_message_text(
+            "\n".join(lines) + "\n\nНатисни ❌ щоб видалити:",
+            reply_markup=InlineKeyboardMarkup(buttons)
+        )
+
+    elif data.startswith("adm_evrm_"):
+        parts = data.split("_")
+        reg_id = int(parts[2])
+        ev_id = int(parts[3])
+        ev_type = parts[4] if len(parts) > 4 else "once"
+        table = "recurring_registrations" if ev_type == "rec" else "event_registrations"
+        conn = get_conn()
+        reg = conn.execute(
+            f"SELECT r.id, m.name FROM {table} r JOIN members m ON r.member_id=m.id WHERE r.id=?",
+            (reg_id,)
+        ).fetchone()
+        if reg:
+            conn.execute(f"DELETE FROM {table} WHERE id=?", (reg_id,))
+            conn.commit()
+            name = dict(reg)["name"]
+        conn.close()
+        if reg:
+            await query.answer(f"✅ {name} видалена")
+            conn2 = get_conn()
+            if ev_type == "rec":
+                ev = conn2.execute("SELECT * FROM recurring_events WHERE id=?", (ev_id,)).fetchone()
+                regs = conn2.execute("""
+                    SELECT rr.id as reg_id, m.name, m.username
+                    FROM recurring_registrations rr JOIN members m ON rr.member_id=m.id
+                    WHERE rr.event_id=? ORDER BY m.name
+                """, (ev_id,)).fetchall()
+            else:
+                ev = conn2.execute("SELECT * FROM events WHERE id=?", (ev_id,)).fetchone()
+                regs = conn2.execute("""
+                    SELECT er.id as reg_id, m.name, m.username
+                    FROM event_registrations er JOIN members m ON er.member_id=m.id
+                    WHERE er.event_id=? ORDER BY m.name
+                """, (ev_id,)).fetchall()
+            conn2.close()
+            title = dict(ev)["title"] if ev else "Подія"
+            if not regs:
+                await query.edit_message_text(f"На «{title}» більше нікого немає.")
+                return
+            lines = [f"📋 Записані на «{title}» ({len(regs)}):"]
+            for r in regs:
+                r = dict(r)
+                uname = f" @{r['username']}" if r.get("username") else ""
+                lines.append(f"• {r['name']}{uname}")
+            buttons = []
+            for r in regs:
+                r = dict(r)
+                buttons.append([InlineKeyboardButton(
+                    f"❌ {r['name']}", callback_data=f"adm_evrm_{r['reg_id']}_{ev_id}_{ev_type}"
+                )])
+            buttons.append([InlineKeyboardButton("◀️ Назад", callback_data="admin_panel")])
+            await query.edit_message_text(
+                "\n".join(lines) + "\n\nНатисни ❌ щоб видалити:",
+                reply_markup=InlineKeyboardMarkup(buttons)
+            )
+        else:
+            await query.answer("Запис не знайдено")
 
     elif data == "admin_panel":
         await query.edit_message_text(
@@ -2155,6 +2267,55 @@ async def cmd_import_subs(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Надішли список:\n@username — РРРР-ММ-ДД\n\nНаприклад:\n@kateryna — 2026-06-01")
     context.user_data["waiting_for"] = "admin_import_subs"
 
+
+
+async def cmd_import_csv(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Адмін надсилає members.csv — бот додає всіх нових учасниць без підписки."""
+    if update.effective_user.id not in ADMIN_IDS:
+        return
+    if not update.message.document:
+        await update.message.reply_text("Надішли файл members.csv як документ.")
+        return
+    doc = update.message.document
+    if not doc.file_name.endswith(".csv"):
+        await update.message.reply_text("Потрібен файл .csv")
+        return
+    file = await context.bot.get_file(doc.file_id)
+    import io, csv as _csv
+    buf = io.BytesIO()
+    await file.download_to_memory(buf)
+    buf.seek(0)
+    text = buf.read().decode("utf-8")
+    reader = _csv.DictReader(io.StringIO(text))
+    conn = get_conn()
+    added = 0
+    skipped = 0
+    for row in reader:
+        tg_id = int(row["id"]) if row.get("id") else None
+        username = row.get("username", "").lstrip("@").strip() or None
+        first = row.get("first_name", "").strip()
+        last = row.get("last_name", "").strip()
+        name = f"{first} {last}".strip() or first or username or str(tg_id)
+        phone = row.get("phone", "").strip() or None
+        if phone and not phone.startswith("+"):
+            phone = "+" + phone
+        existing = conn.execute(
+            "SELECT id FROM members WHERE telegram_id=? OR (username IS NOT NULL AND LOWER(username)=LOWER(?))",
+            (tg_id, username or "")
+        ).fetchone()
+        if existing:
+            skipped += 1
+            continue
+        conn.execute(
+            "INSERT INTO members (telegram_id, username, name, phone, is_active) VALUES (?,?,?,?,1)",
+            (tg_id, username, name, phone)
+        )
+        added += 1
+    conn.commit()
+    conn.close()
+    await update.message.reply_text(
+        f"Імпорт завершено!\n\n✅ Додано: {added}\n⏭ Вже були: {skipped}\n\nТепер /subexpired покаже всіх без підписки."
+    )
 
 async def cmd_edit_recurring(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Редагування регулярної події."""
@@ -2778,6 +2939,7 @@ def main():
 
     app.add_handler(CallbackQueryHandler(handle_callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+    app.add_handler(MessageHandler(filters.FORWARDED & ~filters.COMMAND & filters.ChatType.GROUPS, handle_text))
     app.add_handler(ChatMemberHandler(handle_new_member, ChatMemberHandler.CHAT_MEMBER))
 
     app.job_queue.run_daily(daily_check, time=dtime(hour=CHECK_HOUR_UTC, minute=0), name="daily_check")
