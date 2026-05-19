@@ -1852,6 +1852,9 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         conn.close()
         await message.reply_text("Вішліст оновлено!", reply_markup=InlineKeyboardMarkup([[menu_btn()]]))
 
+    elif "rec_edit" in context.user_data:
+        await handle_admin_input(update, context, waiting or "", text)
+
     elif waiting and waiting.startswith("admin_"):
         await handle_admin_input(update, context, waiting, text)
 
