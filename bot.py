@@ -195,6 +195,13 @@ def init_db():
             week_start TEXT NOT NULL,
             UNIQUE (event_id, member_id, week_start)
         );
+        CREATE TABLE IF NOT EXISTS recurring_reminder_log (
+            id        INTEGER PRIMARY KEY AUTOINCREMENT,
+            event_id  INTEGER NOT NULL,
+            remind_type TEXT NOT NULL,
+            sent_date TEXT NOT NULL,
+            UNIQUE (event_id, remind_type, sent_date)
+        );
     """)
     for col, definition in [
         ("username", "TEXT"), ("birth_year", "INTEGER"), ("city", "TEXT"),
@@ -341,13 +348,18 @@ async def gemini_personal(member: dict, events: list, buddy: Optional[dict]) -> 
 
 async def gemini_reply(question: str, topic: str = "") -> str:
     topic_context = {
-        "підписка": "Дівчина питає про оплату або поновлення підписки. Поясни що треба перейти за посиланням WayForPay і обрати план. НЕ згадуй /start.",
+        "підписка": (
+            f"Дівчина питає про оплату або поновлення підписки. "
+            f"Поясни що треба перейти за посиланням і обрати план: {WFP_URL_30D} "
+            f"НЕ згадуй /start. Не додавай зайвого тексту — тільки коротка відповідь і посилання."
+        ),
         "бот": "Дівчина питає про бота. Поясни що треба написати /start боту в особисті (не в групі). Можна згадати що там є меню з усіма функціями.",
         "нова пошта": "Дівчина шукає адресу для відправки подарунку. Поясни що адреса є в профілі учасниці в боті через кнопку Знайти учасницю. НЕ згадуй /start.",
-        "події": "Дівчата обговорюють подію або зустріч. Відповідай як учасниця спільноти — запитай коли домовились або запропонуй додати подію в бот. НЕ вставляй /start і не рекламуй бота.",
+        "події": "Дівчата обговорюють подію або зустріч. Відповідай як учасниця спільноти — тепло і підтримуюче. НЕ вставляй /start і не рекламуй бота. НЕ згадуй підписку.",
         "день народження": "Питання про подарунок або збір на ДН. Поясни що збори відбуваються автоматично через бота, вішліст іменинниці є в особистому повідомленні. НЕ згадуй /start.",
+        "знайомство": "Нова дівчина представилась або написала привітання. Відповідай дуже тепло і щиро — вітай її в спільноті. НЕ згадуй підписку, бота, /start або оплату. Просто тепле привітання від спільноти.",
     }
-    ctx = topic_context.get(topic, "Відповідай ситуативно і тепло.")
+    ctx = topic_context.get(topic, "Відповідай ситуативно і тепло. НЕ згадуй підписку або бота якщо про це не питали.")
     return await gemini_call(
         f"Ти — учасниця і помічниця жіночої спільноти Комуна Жіноцтва. {ctx}\n\n"
         f"Повідомлення з чату: {question}\n\n"
@@ -837,6 +849,9 @@ async def handle_auto_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message
     if not msg or not msg.text or msg.chat_id != GROUP_CHAT_ID:
         return
+    # Ігноруємо повідомлення від самого бота
+    if msg.from_user and msg.from_user.is_bot:
+        return
     text = msg.text.lower()
 
     # Розширений список ключових слів для кожної теми
@@ -873,6 +888,12 @@ async def handle_auto_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "вішліст", "список бажань", "що подарувати",
             "подарунок", "збір", "скидуємось", "скинутись",
             "зібрати на подарунок",
+        ],
+        "знайомство": [
+            "нова тут", "нова учасниця", "нова у вас", "щойно приєдналась",
+            "тільки дійшла", "тільки зайшла", "перший раз тут",
+            "я новенька", "я нова", "привіт всім", "вітаю всіх",
+            "мене звати", "познайомимось",
         ],
     }
 
@@ -917,13 +938,14 @@ async def handle_auto_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         # Fallback якщо Gemini не відповів
         fallback = {
-            "підписка": "Для оплати або поновлення підписки — напиши @vmuravska, вона допоможе!",
+            "підписка": f"Для оплати або поновлення підписки — переходь за посиланням і обирай зручний план 🌸\n{WFP_URL_30D}",
             "бот": "Щоб активувати бота — напиши йому /start в особисті. Якщо щось не виходить — @vmuravska допоможе!",
             "нова пошта": "Адресу для відправки знайдеш в профілі учасниці через бота. Питання — @vmuravska!",
             "події": "Всі актуальні події є в боті — натисни 'Події' в меню. Питання — @vmuravska!",
             "день народження": "Інфо про іменинницю та збір приходить особисто в бот. Питання — @vmuravska!",
+            "знайомство": "Радіємо тебе бачити! 🌸 Тут завжди тепло і по-своєму — ти вже вдома 🧡",
         }
-        text = fallback.get(matched, f"Дякуємо за питання! @vmuravska зможе допомогти 💕")
+        text = fallback.get(matched, "Дякуємо за питання! @vmuravska зможе допомогти 💕")
         try:
             await msg.reply_text(text)
         except Exception as e:
@@ -1442,6 +1464,46 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             logger.error(f"rec_join error: {e}")
             await query.answer("Вже зареєстрована!")
         conn.close()
+
+
+    elif data.startswith("recedit_"):
+        ev_id = int(data.split("_")[1])
+        conn = get_conn()
+        ev = conn.execute("SELECT * FROM recurring_events WHERE id=?", (ev_id,)).fetchone()
+        conn.close()
+        if not ev:
+            await query.edit_message_text("Подію не знайдено.")
+            return
+        ev = dict(ev)
+        day = WEEKDAYS_NAME[ev["weekday"]]
+        text = (
+            f"Редагування: «{ev['title']}»\n\n"
+            f"📅 День: що{day}\n"
+            f"⏰ Час: {ev['event_time']}\n"
+            f"📍 Посилання: {ev.get('location') or '—'}\n\n"
+            f"Що змінити?"
+        )
+        buttons = [
+            [InlineKeyboardButton("✏️ Назва", callback_data=f"receditf_{ev_id}_title")],
+            [InlineKeyboardButton("📅 День тижня", callback_data=f"receditf_{ev_id}_weekday")],
+            [InlineKeyboardButton("⏰ Час", callback_data=f"receditf_{ev_id}_time")],
+            [InlineKeyboardButton("📍 Посилання", callback_data=f"receditf_{ev_id}_location")],
+            [InlineKeyboardButton("◀️ Назад", callback_data="admin_panel")],
+        ]
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(buttons))
+
+    elif data.startswith("receditf_"):
+        parts = data.split("_")
+        ev_id = int(parts[1])
+        field = parts[2]
+        field_names = {
+            "title": "назву події",
+            "weekday": "день тижня (понеділок/вівторок/середа/четвер/п'ятниця/субота/неділя)",
+            "time": "час у форматі ГГ:ХХ (наприклад 07:00)",
+            "location": "посилання або адресу"
+        }
+        context.user_data["rec_edit"] = {"ev_id": ev_id, "field": field}
+        await query.edit_message_text(f"Введи нову {field_names.get(field, field)}:")
 
     elif data == "admin_panel":
         await query.edit_message_text(
@@ -2057,6 +2119,29 @@ async def cmd_import_subs(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Надішли список:\n@username — РРРР-ММ-ДД\n\nНаприклад:\n@kateryna — 2026-06-01")
     context.user_data["waiting_for"] = "admin_import_subs"
 
+
+async def cmd_edit_recurring(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Редагування регулярної події."""
+    if update.effective_user.id not in ADMIN_IDS:
+        return
+    conn = get_conn()
+    events = conn.execute(
+        "SELECT * FROM recurring_events WHERE is_active=1 ORDER BY weekday"
+    ).fetchall()
+    conn.close()
+    if not events:
+        await update.message.reply_text("Активних регулярних подій немає.")
+        return
+    buttons = []
+    for ev in events:
+        ev = dict(ev)
+        day = WEEKDAYS_NAME[ev["weekday"]]
+        buttons.append([InlineKeyboardButton(
+            f"🔄 {ev['title']} (що{day} о {ev['event_time']})",
+            callback_data=f"recedit_{ev['id']}"
+        )])
+    await update.message.reply_text("Оберіть подію для редагування:", reply_markup=InlineKeyboardMarkup(buttons))
+
 async def cmd_by_city(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id not in ADMIN_IDS:
         return
@@ -2137,6 +2222,39 @@ async def cmd_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ─── Адмін введення ───────────────────────────────────────────────────────────
 
 async def handle_admin_input(update: Update, context: ContextTypes.DEFAULT_TYPE, waiting: str, text: str):
+    # Редагування регулярної події
+    if "rec_edit" in context.user_data:
+        edit_data = context.user_data.pop("rec_edit")
+        ev_id = edit_data["ev_id"]
+        field = edit_data["field"]
+        value = text.strip()
+        if field == "weekday":
+            weekday_num = WEEKDAYS_UA.get(value.lower())
+            if weekday_num is None:
+                await update.message.reply_text(
+                    "Не розпізнав день тижня. Введи: понеділок, вівторок, середа, четвер, п'ятниця, субота або неділя"
+                )
+                context.user_data["rec_edit"] = edit_data
+                return
+            db_field, db_value = "weekday", str(weekday_num)
+        elif field == "time":
+            db_field, db_value = "event_time", value
+        else:
+            db_field, db_value = field, value
+        conn = get_conn()
+        conn.execute(f"UPDATE recurring_events SET {db_field}=? WHERE id=?", (db_value, ev_id))
+        conn.commit()
+        ev = conn.execute("SELECT * FROM recurring_events WHERE id=?", (ev_id,)).fetchone()
+        conn.close()
+        if ev:
+            ev = dict(ev)
+            day = WEEKDAYS_NAME[ev["weekday"]]
+            await update.message.reply_text(
+                f"✅ Збережено!\n\n«{ev['title']}» — що{day} о {ev['event_time']}\n"
+                f"Посилання: {ev.get('location') or '—'}"
+            )
+        return
+
     if waiting == "admin_import_subs":
         context.user_data["waiting_for"] = None
         lines = text.strip().split("\n")
@@ -2382,7 +2500,7 @@ async def handle_bot_mention(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 
 async def job_recurring_reminders(context: ContextTypes.DEFAULT_TYPE):
-    """Щоденна перевірка регулярних подій — нагадування в чат і особисті."""
+    """Щогодинна перевірка регулярних подій — нагадування в чат і особисті."""
     conn = get_conn()
     now = datetime.now()
     today = date.today()
@@ -2405,35 +2523,54 @@ async def job_recurring_reminders(context: ContextTypes.DEFAULT_TYPE):
         if days_until == 0:
             days_until = 7
 
-        # За 7 днів — нагадування в чат
+        # За 7 днів — нагадування в чат (тільки раз на день)
         if days_until == 7:
-            next_date = today + timedelta(days=7)
-            msg = (
-                f"📅 Нагадуємо — наступного {WEEKDAYS_NAME[ev_weekday]} о {ev_time_str} "
-                f"у нас {ev['title']}!\n\n"
-                f"Зареєструватись можна в боті 👇"
-            )
-            kwargs = {"chat_id": GROUP_CHAT_ID, "text": msg}
-            if GROUP_THREAD_ID:
-                kwargs["message_thread_id"] = GROUP_THREAD_ID
-            try:
-                await context.bot.send_message(**kwargs)
-            except Exception as e:
-                logger.error(f"Помилка нагадування в чат (7д): {e}")
+            remind_key = f"7d_{today.isoformat()}"
+            already_sent = conn.execute(
+                "SELECT 1 FROM recurring_reminder_log WHERE event_id=? AND remind_type=? AND sent_date=?",
+                (ev["id"], "7d", today.isoformat())
+            ).fetchone()
+            if not already_sent:
+                msg_text = (
+                    f"📅 Нагадуємо — наступного {WEEKDAYS_NAME[ev_weekday]} о {ev_time_str} "
+                    f"у нас {ev['title']}!\n\nЗареєструватись можна в боті 👇"
+                )
+                kwargs = {"chat_id": GROUP_CHAT_ID, "text": msg_text}
+                if GROUP_THREAD_ID:
+                    kwargs["message_thread_id"] = GROUP_THREAD_ID
+                try:
+                    await context.bot.send_message(**kwargs)
+                    conn.execute(
+                        "INSERT OR IGNORE INTO recurring_reminder_log (event_id, remind_type, sent_date) VALUES (?,?,?)",
+                        (ev["id"], "7d", today.isoformat())
+                    )
+                    conn.commit()
+                except Exception as e:
+                    logger.error(f"Помилка нагадування в чат (7д): {e}")
 
-        # За 1 день — нагадування в чат
+        # За 1 день — нагадування в чат (тільки раз на день)
         if days_until == 1:
-            msg = (
-                f"⏰ Завтра о {ev_time_str} — {ev['title']}!\n\n"
-                f"Ще не записалась? Реєструйся в боті 👇"
-            )
-            kwargs = {"chat_id": GROUP_CHAT_ID, "text": msg}
-            if GROUP_THREAD_ID:
-                kwargs["message_thread_id"] = GROUP_THREAD_ID
-            try:
-                await context.bot.send_message(**kwargs)
-            except Exception as e:
-                logger.error(f"Помилка нагадування в чат (1д): {e}")
+            already_sent = conn.execute(
+                "SELECT 1 FROM recurring_reminder_log WHERE event_id=? AND remind_type=? AND sent_date=?",
+                (ev["id"], "1d", today.isoformat())
+            ).fetchone()
+            if not already_sent:
+                msg_text = (
+                    f"⏰ Завтра о {ev_time_str} — {ev['title']}!\n\n"
+                    f"Ще не записалась? Реєструйся в боті 👇"
+                )
+                kwargs = {"chat_id": GROUP_CHAT_ID, "text": msg_text}
+                if GROUP_THREAD_ID:
+                    kwargs["message_thread_id"] = GROUP_THREAD_ID
+                try:
+                    await context.bot.send_message(**kwargs)
+                    conn.execute(
+                        "INSERT OR IGNORE INTO recurring_reminder_log (event_id, remind_type, sent_date) VALUES (?,?,?)",
+                        (ev["id"], "1d", today.isoformat())
+                    )
+                    conn.commit()
+                except Exception as e:
+                    logger.error(f"Помилка нагадування в чат (1д): {e}")
 
         # За 1 годину — особисте повідомлення зареєстрованим
         if days_until == 0 or (days_until == 7 and current_weekday == ev_weekday):
@@ -2504,7 +2641,9 @@ def main():
     app.add_handler(CommandHandler("renewsub",    cmd_renew_sub))
     app.add_handler(CommandHandler("subexpiring", cmd_sub_expiring))
     app.add_handler(CommandHandler("subexpired",  cmd_sub_expired))
-    app.add_handler(CommandHandler("importsubs",  cmd_import_subs))
+    app.add_handler(CommandHandler("importsubs",     cmd_import_subs))
+    app.add_handler(CommandHandler("eventmembers",   cmd_event_members))
+    app.add_handler(CommandHandler("editrecurring",  cmd_edit_recurring))
     app.add_handler(CommandHandler("bycity",      cmd_by_city))
     app.add_handler(CommandHandler("addevent",    cmd_add_event))
     app.add_handler(CommandHandler("editevent",   cmd_edit_event))
