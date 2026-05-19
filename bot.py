@@ -1020,7 +1020,7 @@ async def handle_ai_events(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if GROUP_THREAD_ID and msg.message_thread_id != GROUP_THREAD_ID:
         return
 
-    is_forward = bool(msg.forward_origin or msg.forward_from or msg.forward_from_chat)
+    is_forward = bool(msg.forward_origin or msg.forward_from)
     text = msg.text or msg.caption or ""
     if not text:
         return
