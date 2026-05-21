@@ -1653,6 +1653,24 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             await query.answer("Запис не знайдено")
 
+
+    elif data.startswith("del_member_"):
+        member_id = int(data.split("_")[2])
+        conn = get_conn()
+        member = conn.execute("SELECT * FROM members WHERE id=?", (member_id,)).fetchone()
+        if member:
+            member = dict(member)
+            conn.execute("DELETE FROM members WHERE id=?", (member_id,))
+            conn.commit()
+            await query.answer(f"✅ Видалено: {member.get('name', member_id)}")
+            await query.edit_message_text(
+                f"Запис видалено: {member.get('name')} "
+                f"(@{member.get('username', '—')})"
+            )
+        else:
+            await query.answer("Запис не знайдено")
+        conn.close()
+
     elif data == "admin_panel":
         await query.edit_message_text(
             "Адмін-панель:\n\n"
@@ -1675,7 +1693,9 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "/clearlog — очистити журнал\n"
             "/eventmembers — список записаних\n"
             "/editrecurring — регулярні події\n"
-            "/importcsv — імпорт CSV",
+            "/importcsv — імпорт CSV\n"
+            "/notactivated — не активували бота\n"
+            "/duplicates — дублікати",
             reply_markup=InlineKeyboardMarkup([[back_btn(), menu_btn()]])
         )
 
@@ -2382,6 +2402,101 @@ async def cmd_edit_recurring(update: Update, context: ContextTypes.DEFAULT_TYPE)
             callback_data=f"recedit_{ev['id']}"
         )])
     await update.message.reply_text("Оберіть подію для редагування:", reply_markup=InlineKeyboardMarkup(buttons))
+
+
+async def cmd_not_activated(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Список учасниць які не активували бота (немає telegram_id)."""
+    if update.effective_user.id not in ADMIN_IDS:
+        return
+    conn = get_conn()
+    rows = conn.execute("""
+        SELECT name, username, phone FROM members
+        WHERE (telegram_id IS NULL OR telegram_id = 0)
+        AND is_active = 1
+        ORDER BY name
+    """).fetchall()
+    conn.close()
+    if not rows:
+        await update.message.reply_text("Всі активували бота! 🎉")
+        return
+    lines = [f"Не активували бота ({len(rows)}):"]
+    for r in rows:
+        r = dict(r)
+        parts = [r.get("name") or "—"]
+        if r.get("username"):
+            parts.append(f"@{r['username'].lstrip('@')}")
+        if r.get("phone"):
+            parts.append(r["phone"])
+        lines.append("• " + " ".join(parts))
+    await update.message.reply_text("\n".join(lines))
+
+
+async def cmd_duplicates(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Знаходить дублікати по username або телефону."""
+    if update.effective_user.id not in ADMIN_IDS:
+        return
+    conn = get_conn()
+
+    # Дублікати по username
+    dup_users = conn.execute("""
+        SELECT LOWER(username) as uname, COUNT(*) as cnt, GROUP_CONCAT(id) as ids,
+               GROUP_CONCAT(name, ' | ') as names
+        FROM members
+        WHERE username IS NOT NULL AND username != ''
+        GROUP BY LOWER(username)
+        HAVING cnt > 1
+    """).fetchall()
+
+    # Дублікати по телефону
+    dup_phones = conn.execute("""
+        SELECT phone, COUNT(*) as cnt, GROUP_CONCAT(id) as ids,
+               GROUP_CONCAT(name, ' | ') as names
+        FROM members
+        WHERE phone IS NOT NULL AND phone != ''
+        GROUP BY phone
+        HAVING cnt > 1
+    """).fetchall()
+
+    conn.close()
+
+    if not dup_users and not dup_phones:
+        await update.message.reply_text("Дублікатів не знайдено ✅")
+        return
+
+    lines = ["Знайдені дублікати:\n"]
+    buttons = []
+
+    if dup_users:
+        lines.append("По username:")
+        for row in dup_users:
+            row = dict(row)
+            ids = row["ids"].split(",")
+            lines.append(f"• @{row['uname']} ({row['cnt']}x): {row['names']}")
+            # Кнопка видалити старіший (менший id)
+            keep_id = max(int(i) for i in ids)
+            del_ids = [i for i in ids if int(i) != keep_id]
+            for del_id in del_ids:
+                buttons.append([InlineKeyboardButton(
+                    f"❌ Видалити запис #{del_id} (@{row['uname']})",
+                    callback_data=f"del_member_{del_id}"
+                )])
+
+    if dup_phones:
+        lines.append("\nПо телефону:")
+        for row in dup_phones:
+            row = dict(row)
+            ids = row["ids"].split(",")
+            lines.append(f"• {row['phone']} ({row['cnt']}x): {row['names']}")
+            keep_id = max(int(i) for i in ids)
+            del_ids = [i for i in ids if int(i) != keep_id]
+            for del_id in del_ids:
+                buttons.append([InlineKeyboardButton(
+                    f"❌ Видалити запис #{del_id} ({row['phone']})",
+                    callback_data=f"del_member_{del_id}"
+                )])
+
+    markup = InlineKeyboardMarkup(buttons) if buttons else None
+    await update.message.reply_text("\n".join(lines), reply_markup=markup)
 
 async def cmd_by_city(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id not in ADMIN_IDS:
