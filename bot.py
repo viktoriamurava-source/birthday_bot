@@ -1672,7 +1672,10 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "/addevent — додати подію\n"
         "/editevent — редагувати подію\n"
             "/testcheck — тест\n"
-            "/clearlog — очистити журнал",
+            "/clearlog — очистити журнал\n"
+            "/eventmembers — список записаних\n"
+            "/editrecurring — регулярні події\n"
+            "/importcsv — імпорт CSV",
             reply_markup=InlineKeyboardMarkup([[back_btn(), menu_btn()]])
         )
 
@@ -2267,7 +2270,7 @@ async def cmd_sub_expired(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_import_subs(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id not in ADMIN_IDS:
         return
-    await update.message.reply_text("Надішли список:\n@username — РРРР-ММ-ДД\n\nНаприклад:\n@kateryna — 2026-06-01")
+    await update.message.reply_text("Надішли список у форматі:\n@username — 2026/12/31\n\nПідтримуються формати дати: 2026/12/31 або 2026-12-31\nТакож можна передавати номер телефону: +380501234567 — 2026/12/31")
     context.user_data["waiting_for"] = "admin_import_subs"
 
 
@@ -2502,20 +2505,38 @@ async def handle_admin_input(update: Update, context: ContextTypes.DEFAULT_TYPE,
             line = line.strip()
             if not line:
                 continue
-            m = re.match(r'(@?\S+)\s*[—\-–]\s*(\d{4}-\d{2}-\d{2})', line)
-            if m:
-                identifier = m.group(1).lstrip("@")
-                until_str = m.group(2)
-                result = conn.execute("""
-                    UPDATE members SET subscription_until=? WHERE
-                    LOWER(username)=LOWER(?) OR LOWER(username)=LOWER(?) OR LOWER(name) LIKE LOWER(?)
-                """, (until_str, f"@{identifier}", identifier, f"%{identifier}%"))
-                if result.rowcount:
-                    imported += 1
+            # Підтримка форматів: @user — 2026/12/31 або +380... — 2026-12-31
+            date_m = re.search(r'(\d{4})[/\-](\d{2})[/\-](\d{2})', line)
+            user_m = re.search(r'@(\w+)', line)
+            phone_m = re.search(r'\+380\d{9}', line.replace(' ', ''))
+            if date_m:
+                until_str = f"{date_m.group(1)}-{date_m.group(2)}-{date_m.group(3)}"
+                if user_m:
+                    identifier = user_m.group(1)
+                    result = conn.execute("""
+                        UPDATE members SET subscription_until=?, is_active=1 WHERE
+                        LOWER(username)=LOWER(?) OR LOWER(username)=LOWER(?)
+                    """, (until_str, f"@{identifier}", identifier))
+                    if result.rowcount:
+                        imported += 1
+                    else:
+                        conn.execute("INSERT INTO members (name, username, subscription_until, is_active) VALUES (?,?,?,1)",
+                                     (identifier, f"@{identifier}", until_str))
+                        created += 1
+                elif phone_m:
+                    phone = phone_m.group(0)
+                    result = conn.execute(
+                        "UPDATE members SET subscription_until=?, is_active=1 WHERE phone=?",
+                        (until_str, phone)
+                    )
+                    if result.rowcount:
+                        imported += 1
+                    else:
+                        conn.execute("INSERT INTO members (name, phone, subscription_until, is_active) VALUES (?,?,?,1)",
+                                     (phone, phone, until_str))
+                        created += 1
                 else:
-                    conn.execute("INSERT INTO members (name, username, subscription_until) VALUES (?,?,?)",
-                                 (identifier, f"@{identifier}", until_str))
-                    created += 1
+                    failed += 1
             else:
                 failed += 1
         conn.commit()
